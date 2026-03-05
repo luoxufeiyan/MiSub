@@ -69,7 +69,8 @@ export async function handleSubscriptionDebug(context) {
                 customId: p.customId,
                 name: p.name,
                 enabled: p.enabled !== false,
-                subscriptionIds: p.subscriptionIds || [],
+                subscriptions: p.subscriptions || [],
+                manualNodes: p.manualNodes || [],
                 nodeTransform: p.nodeTransform?.enabled ? '启用' : '禁用',
                 dedup: p.nodeTransform?.dedup?.enabled ? '启用' : '禁用'
             }))
@@ -108,10 +109,12 @@ export async function handleSubscriptionDebug(context) {
                         }
                     };
                 } else {
-                    // 获取 Profile 关联的订阅
-                    const profileSubIds = profile.subscriptionIds || [];
+                    // 获取 Profile 关联的订阅和手工节点
+                    const profileSubIds = profile.subscriptions || [];
+                    const profileNodeIds = profile.manualNodes || [];
+                    const allProfileIds = [...profileSubIds, ...profileNodeIds];
                     const targetMisubs = allMisubs.filter(sub => 
-                        profileSubIds.includes(sub.id) && sub.enabled !== false
+                        allProfileIds.includes(sub.id) && sub.enabled !== false
                     );
                     
                     debugInfo.subscriptionTest = {
