@@ -506,6 +506,78 @@ function parseHysteria2Url(url) {
 }
 
 /**
+ * 将 SOCKS5 URL 转换为 Clash 代理对象
+ * @param {string} url - SOCKS5 URL
+ * @returns {Object|null} Clash 代理对象
+ */
+function parseSocks5Url(url) {
+    try {
+        // socks5://[username:password@]server:port#name
+        let body = url.substring(9); // 去掉 socks5://
+        const name = extractName(url);
+
+        // 去掉 fragment
+        const hashIndex = body.indexOf('#');
+        if (hashIndex !== -1) body = body.substring(0, hashIndex);
+
+        // 去掉 query
+        const queryIndex = body.indexOf('?');
+        if (queryIndex !== -1) body = body.substring(0, queryIndex);
+
+        let username, password, server, port;
+
+        const atIndex = body.lastIndexOf('@');
+        if (atIndex !== -1) {
+            // 有认证: username:password@server:port
+            const authPart = body.substring(0, atIndex);
+            const serverPart = body.substring(atIndex + 1);
+
+            const colonIndex = authPart.indexOf(':');
+            if (colonIndex !== -1) {
+                username = decodeURIComponent(authPart.substring(0, colonIndex));
+                password = decodeURIComponent(authPart.substring(colonIndex + 1));
+            }
+
+            const parsed = parseHostPort(serverPart);
+            server = parsed.server;
+            port = parsed.port;
+        } else {
+            // 无认证: server:port
+            const parsed = parseHostPort(body);
+            server = parsed.server;
+            port = parsed.port;
+        }
+
+        if (!server || !port) {
+            return null;
+        }
+
+        const proxy = {
+            name: name || `SOCKS5-${server}`,
+            type: 'socks5',
+            server,
+            port
+        };
+
+        // 添加认证信息
+        if (username) {
+            proxy.username = username;
+        }
+        if (password) {
+            proxy.password = password;
+        }
+
+        // UDP 支持
+        proxy.udp = true;
+
+        return proxy;
+    } catch (e) {
+        console.error('解析 SOCKS5 URL 失败:', e);
+        return null;
+    }
+}
+
+/**
  * 将节点 URL 转换为 Clash 代理对象
  * @param {string} url - 节点 URL
  * @returns {Object|null} Clash 代理对象
@@ -525,6 +597,8 @@ export function urlToClashProxy(url) {
         return parseSsUrl(url);
     } else if (lowerUrl.startsWith('hysteria2://') || lowerUrl.startsWith('hy2://')) {
         return parseHysteria2Url(url);
+    } else if (lowerUrl.startsWith('socks5://')) {
+        return parseSocks5Url(url);
     }
 
     // 不支持的协议
