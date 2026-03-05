@@ -64,7 +64,7 @@ export function isManualNodeEntry(item) {
 
   if (/^https?:\/\//i.test(trimmedUrl)) return false;
 
-  const validProtocols = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy2|tuic|snell|naive|socks5|socks|http|anytls):\/\//i;
+  const validProtocols = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy2|tuic|snell|naive\+https?|naive\+quic|socks5|socks|http|anytls):\/\//i;
   return validProtocols.test(trimmedUrl);
 }
 
