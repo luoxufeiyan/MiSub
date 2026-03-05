@@ -73,6 +73,10 @@ export async function onRequest(context) {
             } else if (url.pathname.startsWith('/sub/')) {
                 // MiSub 订阅路由
                 return await handleMisubRequest(context);
+            } else if (url.pathname === '/debug/manual-nodes') {
+                // 手工节点调试路由
+                const { handleManualNodeDebug } = await import('./modules/handlers/manual-node-debug-handler.js');
+                return await handleManualNodeDebug(context);
             } else if (url.pathname === '/cron') {
                 // 定时任务路由 (需要认证)
                 // 使用设置中的 cronSecret 进行验证
