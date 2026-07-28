@@ -37,10 +37,16 @@ const presetRegions = [
 
 const presetProtocols = [
   { label: 'SS', pattern: 'proto:ss' },
+  { label: 'SSR', pattern: 'proto:ssr' },
   { label: 'VMess', pattern: 'proto:vmess' },
   { label: 'VLESS', pattern: 'proto:vless' },
   { label: 'Trojan', pattern: 'proto:trojan' },
   { label: 'Hysteria', pattern: 'proto:hysteria' },
+  { label: 'Hysteria2', pattern: 'proto:hysteria2' },
+  { label: 'TUIC', pattern: 'proto:tuic' },
+  { label: 'AnyTLS', pattern: 'proto:anytls' },
+  { label: 'Socks5', pattern: 'proto:socks5' },
+  { label: 'WireGuard', pattern: 'proto:wireguard' },
 ];
 
 const presetKeywords = [

@@ -2,8 +2,7 @@ import { parseNodeList } from '../utils/node-parser.js';
 import { fetchWithRetry } from '../../services/fetch-utils.js';
 import { buildFetchProxyUrl } from '../../utils/fetch-proxy-utils.js';
 import {
-    filterNodeObjects,
-    parseFilterRuleText,
+    applyRuleTextToNodeObjects,
     encodeArrayBufferToBase64
 } from '../utils/node-cleaner.js';
 
@@ -77,7 +76,7 @@ export async function fetchSubscriptionNodes(url, subscriptionName, userAgent, c
         }
 
         if (excludeRules && excludeRules.trim()) {
-            parsedNodes = applyExcludeRulesToNodes(parsedNodes, excludeRules);
+            parsedNodes = applyRuleTextToNodeObjects(parsedNodes, excludeRules);
         }
 
         return {
@@ -99,26 +98,4 @@ export async function fetchSubscriptionNodes(url, subscriptionName, userAgent, c
             error: e.message
         };
     }
-}
-
-/**
- * 应用过滤规则 (使用 node-cleaner 的重构逻辑)
- * @param {Array} nodes 
- * @param {string} ruleText 
- */
-function applyExcludeRulesToNodes(nodes, ruleText) {
-    if (!ruleText || !ruleText.trim()) return nodes;
-    const { includeRules, excludeRules } = parseFilterRuleText(ruleText);
-
-    let resultNodes = nodes;
-
-    // 使用 node-cleaner 中导出的 filterNodeObjects
-    if (includeRules.hasRules) {
-        resultNodes = filterNodeObjects(resultNodes, includeRules, 'include');
-    }
-    if (excludeRules.hasRules) {
-        resultNodes = filterNodeObjects(resultNodes, excludeRules, 'exclude');
-    }
-
-    return resultNodes;
 }

@@ -7,6 +7,7 @@ import { StorageFactory } from '../../storage-adapter.js';
 import { DEFAULT_SETTINGS, KV_KEY_SETTINGS } from '../config.js';
 import { createJsonResponse, createErrorResponse, JSON_BODY_LIMITS, readJsonWithLimit } from '../utils.js';
 import { parseNodeList } from '../utils/node-parser.js';
+import { applyRuleTextToNodeObjects } from '../utils/node-cleaner.js';
 import { getProcessedUserAgent } from '../../utils/format-utils.js';
 import { buildFetchProxyUrl } from '../../utils/fetch-proxy-utils.js';
 
@@ -69,7 +70,7 @@ export async function handleNodeCountRequest(request, env) {
     }
 
     try {
-        const { url: subUrl, fetchProxy, plusAsSpace, userAgent: customUserAgent } = await readJsonWithLimit(request, JSON_BODY_LIMITS.normal);
+        const { url: subUrl, fetchProxy, plusAsSpace, userAgent: customUserAgent, exclude } = await readJsonWithLimit(request, JSON_BODY_LIMITS.normal);
         if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//i.test(subUrl)) {
             return createErrorResponse('Invalid or missing url', 400);
         }
@@ -233,7 +234,16 @@ export async function handleNodeCountRequest(request, env) {
                     }
 
                     // 使用 parseNodeList 函数，与预览功能完全一致
-                    const parsedNodes = parseNodeList(text, { plusAsSpace: Boolean(plusAsSpace) });
+                    let parsedNodes = parseNodeList(text, { plusAsSpace: Boolean(plusAsSpace) });
+
+                    // 规则由前端按订阅传入，避免按 URL 匹配订阅时误用其它同名订阅的规则
+                    if (exclude && String(exclude).trim()) {
+                        try {
+                            parsedNodes = applyRuleTextToNodeObjects(parsedNodes, exclude);
+                        } catch (filterErr) {
+                            console.warn('[NodeHandler] Failed to apply exclude rules for node count, using raw count:', filterErr);
+                        }
+                    }
 
                     // [回退2] 如果响应头中也没有流量信息，尝试从 body 伪节点中解析
                     // 这在使用 FetchProxy（如 Vercel）时非常重要，因为代理会丢弃上游响应头
@@ -476,7 +486,10 @@ export async function handleBatchUpdateNodesRequest(request, env) {
                 let nodeCount = 0;
                 try {
                     // 使用 parseNodeList 函数，与预览功能完全一致
-                    const parsedNodes = parseNodeList(text);
+                    let parsedNodes = parseNodeList(text);
+                    if (subscription.exclude && String(subscription.exclude).trim()) {
+                        parsedNodes = applyRuleTextToNodeObjects(parsedNodes, subscription.exclude);
+                    }
                     nodeCount = parsedNodes.length;
                 } catch (e) {
                     // 解码失败，尝试简单统计

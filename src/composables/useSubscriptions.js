@@ -84,7 +84,8 @@ export function useSubscriptions(markDirty) {
         subToUpdate.url,
         subToUpdate.fetchProxy,
         Boolean(subToUpdate.plusAsSpace),
-        subToUpdate.customUserAgent
+        subToUpdate.customUserAgent,
+        subToUpdate.exclude
       );
 
       // 清除超时保护
@@ -278,7 +279,7 @@ export function useSubscriptions(markDirty) {
 
         for (const sub of subsToUpdate) {
           try {
-            const result = await fetchNodeCount(sub.url);
+            const result = await fetchNodeCount(sub.url, sub.fetchProxy, Boolean(sub.plusAsSpace), sub.customUserAgent, sub.exclude);
             if (result.success && result.data.userInfo) {
               sub.userInfo = result.data.userInfo;
             }

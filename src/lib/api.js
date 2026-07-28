@@ -130,7 +130,7 @@ export async function saveMisubs(misubs, profiles) {
     }
 }
 
-export async function fetchNodeCount(subUrl, fetchProxy = '', plusAsSpace = false, userAgent = '') {
+export async function fetchNodeCount(subUrl, fetchProxy = '', plusAsSpace = false, userAgent = '', exclude = '') {
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000); // 60秒超时
@@ -144,6 +144,9 @@ export async function fetchNodeCount(subUrl, fetchProxy = '', plusAsSpace = fals
         }
         if (userAgent) {
             payload.userAgent = userAgent;
+        }
+        if (exclude) {
+            payload.exclude = exclude;
         }
 
         const data = await api.post('/api/node_count', payload, { signal: controller.signal });

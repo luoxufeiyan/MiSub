@@ -154,6 +154,17 @@ export function encodeArrayBufferToBase64(buffer) {
 // --- Rule Helpers (Exported) ---
 
 /**
+ * 协议别名归一化：将协议的常见别名统一为标准名，
+ * 以便 `proto:hysteria2` 等规则能匹配 hy2:// 节点。
+ */
+function normalizeProtocolName(proto) {
+    const s = String(proto || '').toLowerCase();
+    if (s === 'hy2') return 'hysteria2';
+    if (s === 'hy') return 'hysteria';
+    return s;
+}
+
+/**
  * 将多行规则文本解析为规则对象
  * @param {string|string[]} lines 
  * @param {boolean} stripKeepPrefix 
@@ -178,7 +189,7 @@ export function buildRuleSet(lines, stripKeepPrefix = false) {
                 .split(',')
                 .map(p => p.trim().toLowerCase())
                 .filter(Boolean);
-            parts.forEach(p => protocols.add(p));
+            parts.forEach(p => protocols.add(normalizeProtocolName(p)));
             continue;
         }
 
@@ -249,11 +260,13 @@ export function filterNodeObjects(nodes, rules, mode = 'exclude') {
     const isInclude = mode === 'include';
 
     return nodes.filter(node => {
-        const protocol = (node.protocol || '').toLowerCase();
+        const protocol = normalizeProtocolName(node.protocol || '');
         const name = node.name || '';
 
         const protocolHit = protocol && rules.protocols.has(protocol);
-        const nameHit = rules.nameRegex ? rules.nameRegex.test(name) : false;
+        const nameHit = rules.nameRegex
+            ? (rules.nameRegex.test(name) || rules.nameRegex.test(protocol))
+            : false;
 
         if (isInclude) {
             return protocolHit || nameHit;
@@ -333,8 +346,8 @@ export function applyManualNodeName(nodeUrl, customName) {
 
 /**
  * 应用过滤规则 (针对 URL string 列表)
- * @param {Array} validNodes 
- * @param {Object} sub 
+ * @param {Array} validNodes
+ * @param {Object} sub
  * @returns {Array} filtered nodes
  */
 export function applyFilterRules(validNodes, sub) {
@@ -365,4 +378,26 @@ export function applyFilterRules(validNodes, sub) {
     }
 
     return filteredNodes;
+}
+
+/**
+ * 将过滤规则文本（包含 keep: / --- / proto: 等语法）应用到节点对象列表
+ * 与 node-fetcher 中 applyExcludeRulesToNodes 等价，但作用于已解析的节点对象。
+ * 用于节点计数等场景，确保计数与节点预览一致（均应用了 exclude 规则）。
+ * @param {Array<Object>} nodes - 节点对象数组（需含 protocol/name 字段）
+ * @param {string} ruleText - 规则文本
+ * @returns {Array<Object>} 过滤后的节点对象
+ */
+export function applyRuleTextToNodeObjects(nodes, ruleText) {
+    if (!ruleText || !String(ruleText).trim() || !Array.isArray(nodes)) return nodes;
+    const { includeRules, excludeRules } = parseFilterRuleText(ruleText);
+
+    let resultNodes = nodes;
+    if (includeRules.hasRules) {
+        resultNodes = filterNodeObjects(resultNodes, includeRules, 'include');
+    }
+    if (excludeRules.hasRules) {
+        resultNodes = filterNodeObjects(resultNodes, excludeRules, 'exclude');
+    }
+    return resultNodes;
 }

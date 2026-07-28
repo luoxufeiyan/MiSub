@@ -847,7 +847,7 @@ function buildRuleSet(lines, stripKeepPrefix = false) {
                 .split(',')
                 .map(p => p.trim().toLowerCase())
                 .filter(Boolean);
-            parts.forEach(p => protocols.add(p));
+            parts.forEach(p => protocols.add(normalizeProtocolName(p)));
             continue;
         }
 
@@ -860,6 +860,13 @@ function buildRuleSet(lines, stripKeepPrefix = false) {
         nameRegex,
         hasRules: protocols.size > 0 || Boolean(nameRegex)
     };
+}
+
+function normalizeProtocolName(proto) {
+    const s = String(proto || '').toLowerCase();
+    if (s === 'hy2') return 'hysteria2';
+    if (s === 'hy') return 'hysteria';
+    return s;
 }
 
 function buildSafeRegex(patterns) {
@@ -879,21 +886,24 @@ function filterNodes(nodes, rules, mode = 'exclude') {
     return nodes.filter(nodeLink => {
         // [升级] 传统过滤引擎现在也支持元数据/ISO感知
         const nodeInfo = parseNodeInfo(nodeLink);
-        const protocol = nodeInfo.protocol || '';
+        const protocol = normalizeProtocolName(nodeInfo.protocol || '');
         const nodeName = nodeInfo.name || '';
-        const regionZh = nodeInfo.region || ''; 
-        
+        const regionZh = nodeInfo.region || '';
+
         // --- [ISO感知核心逻辑] ---
         // 我们利用 geo-utils 中的 extractNodeRegion 来反查 ISO 代码
         // 虽然 info 里没显式带 regionCode，但在 rules 匹配时增加深度检测
         const protocolHit = protocol && rules.protocols.has(protocol);
-        
+
         let nameHit = false;
         if (rules.nameRegex) {
             // [双重匹配] 匹配原始名称、中文名，以及尝试匹配 ISO 关键词
-            nameHit = rules.nameRegex.test(nodeName) || 
-                      rules.nameRegex.test(regionZh);
-            
+            // 关键修复：裸协议名（如 `trojan`）也应与节点实际协议比对，
+            // 否则名称里不含协议字的节点会被漏筛。
+            nameHit = rules.nameRegex.test(nodeName) ||
+                      rules.nameRegex.test(regionZh) ||
+                      rules.nameRegex.test(protocol);
+
             // 如果上述没中，但规则包含大写 ISO 代码，尝试深度匹配
             if (!nameHit && /^[A-Z]{2}$/.test(rules.nameRegex.source)) {
                  // 这里可以进一步扩展，但为了性能目前保持双重匹配
