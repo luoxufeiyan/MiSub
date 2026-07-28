@@ -1,15 +1,13 @@
 
 
 
-import { createJsonResponse, createErrorResponse } from '../utils.js';
+import { createJsonResponse, createErrorResponse, JSON_BODY_LIMITS, readJsonWithLimit } from '../utils.js';
 
 const KV_KEY_CLIENTS = 'misub_clients_v1';
 const MAX_ICON_DATA_URL_BYTES = 200 * 1024;
 
 function getKV(env) {
-    if (env?.MISUB_KV) return env.MISUB_KV;
-    try { if (typeof MISUB_KV !== 'undefined' && MISUB_KV) return MISUB_KV; } catch (_) {} // eslint-disable-line no-undef
-    return null;
+    return env?.MISUB_KV || null;
 }
 
 function isStorageUnavailableError(error) {
@@ -29,6 +27,7 @@ const LEGACY_CLIENT_ICONS = {
     'nekobox': '🐱',
     'stash': '📦',
     'loon': '🎈',
+    'egern': '🪺',
     'surge': '⚡️',
     'flclash': '🦋',
     'clashmi': 'Ⓜ️',
@@ -48,6 +47,7 @@ const LEGACY_ICON_ALIASES = {
     '/icons/clients/nekobox.png': '/icons/clients/nekobox.svg',
     '/icons/clients/stash.jpg': '/icons/clients/stash.svg',
     '/icons/clients/loon.jpg': '/icons/clients/loon.svg',
+    '/icons/clients/egern.png': '/icons/clients/egern.svg',
     '/icons/clients/surge.jpg': '/icons/clients/surge.svg',
     '/icons/clients/flclash.png': '/icons/clients/flclash.svg',
     '/icons/clients/clashmi.png': '/icons/clients/clashmi.svg',
@@ -145,6 +145,16 @@ const DEFAULT_CLIENTS = [
         description: 'iOS 平台功能强大的网络工具，界面简洁优雅，支持插件扩展。',
         platforms: ['ios', 'macos'],
         url: 'https://apps.apple.com/us/app/loon/id1373567447',
+        repo: null,
+        version: null
+    },
+    {
+        id: 'egern',
+        name: 'Egern',
+        icon: '/icons/clients/egern.svg',
+        description: 'iOS 平台的规则代理客户端，支持通过订阅链接快速导入配置。',
+        platforms: ['ios'],
+        url: 'https://apps.apple.com/us/app/egern/id1616105820',
         repo: null,
         version: null
     },
@@ -323,9 +333,9 @@ export async function handleClientRequest(request, env) {
 
             let body;
             try {
-                body = await request.json();
+                body = await readJsonWithLimit(request, JSON_BODY_LIMITS.large);
             } catch (e) {
-                return createErrorResponse('Invalid JSON body', 400);
+                return createErrorResponse(e?.status === 413 ? e.message : 'Invalid JSON body', e?.status || 400);
             }
 
             let clients = await kv.get(KV_KEY_CLIENTS).then(r => r ? JSON.parse(r) : null) || [];
@@ -376,7 +386,7 @@ export async function handleClientRequest(request, env) {
     } catch (e) {
         console.error('[Client Handler Error]', e);
         if (isStorageUnavailableError(e)) {
-            return createErrorResponse('KV 存储已暂停，客户端配置当前无法保存。若为 EdgeOne 部署，请先恢复 KV；若为 Cloudflare 部署，可改用 D1。', 503);
+            return createErrorResponse('KV 存储已暂停，客户端配置当前无法保存。请先恢复 KV 绑定，或改用 D1。', 503);
         }
         return createErrorResponse(`Operation failed: ${e.message}`, 500);
     }

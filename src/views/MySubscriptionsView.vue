@@ -6,9 +6,15 @@ import ProfilePanel from '../components/profiles/ProfilePanel.vue';
 import Modal from '../components/forms/Modal.vue';
 import { storeToRefs } from 'pinia';
 import { useManualNodes } from '../composables/useManualNodes.js';
+import { useToastStore } from '../stores/toast.js';
+import { useI18n } from '../i18n/index.js';
+
+const { t } = useI18n();
 
 const dataStore = useDataStore();
 const { markDirty } = dataStore;
+const { showToast } = useToastStore();
+const isProfileSorting = ref(false);
 
 const {
   profiles, editingProfile, isNewProfile, showProfileModal, showDeleteProfilesModal,
@@ -21,10 +27,20 @@ const {
 const { subscriptions } = storeToRefs(dataStore);
 const { manualNodes } = useManualNodes(markDirty);
 
-const handleProfileReorder = (fromIndex, toIndex) => {
+const handleProfileReorder = (profileId, direction) => {
+  const fromIndex = profiles.value.findIndex(profile => profile.id === profileId || profile.customId === profileId);
+  if (fromIndex === -1) return;
+
+  const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
+  if (toIndex < 0 || toIndex >= profiles.value.length) return;
+
   const [item] = profiles.value.splice(fromIndex, 1);
   profiles.value.splice(toIndex, 0, item);
   markDirty();
+};
+
+const toggleProfileSorting = () => {
+  isProfileSorting.value = !isProfileSorting.value;
 };
 
 const NodePreviewModal = defineAsyncComponent(() => import('../components/modals/NodePreview/NodePreviewModal.vue'));
@@ -78,15 +94,15 @@ const handleQRCode = (profileId) => {
   const profile = profiles.value.find(p => p.id === profileId || p.customId === profileId);
   if (profile) {
     if (!settings.value.profileToken) {
-      showToast("未配置订阅组 Token，无法生成链接", "error");
+      showToast(t('notices.noToken'), "error");
       return;
     }
     const token = settings.value.profileToken;
     const baseUrl = window.location.origin;
     // Use customId if available, otherwise use id
     const idToUse = profile.customId || profile.id;
-    qrCodeUrl.value = `${baseUrl}/sub/${token}/${idToUse}`;
-    qrCodeTitle.value = profile.name || '订阅组二维码';
+    qrCodeUrl.value = `${baseUrl}/${token}/${idToUse}`;
+    qrCodeTitle.value = profile.name || t('profiles.qrCodeTitle');
     showQRCodeModal.value = true;
   }
 };
@@ -97,9 +113,9 @@ const handleQRCode = (profileId) => {
 
 
     <ProfilePanel :profiles="profiles" :paginated-profiles="paginatedProfiles" :current-page="profilesCurrentPage"
-      :total-pages="profilesTotalPages" @add="handleAddProfile" @edit="handleEditProfile" @delete="handleDeleteProfile"
+      :total-pages="profilesTotalPages" :is-sorting="isProfileSorting" @add="handleAddProfile" @edit="handleEditProfile" @delete="handleDeleteProfile"
       @deleteAll="showDeleteProfilesModal = true" @toggle="handleProfileToggle" @openCopy="handleOpenCopy"
-      @preview="handlePreviewProfile" @reorder="handleProfileReorder"
+      @preview="handlePreviewProfile" @reorder="handleProfileReorder" @toggle-sort="toggleProfileSorting"
       @change-page="changeProfilesPage" @viewLogs="handleViewLogs" @qrcode="handleQRCode" />
 
     <LogModal :show="showLogModal" @update:show="showLogModal = $event" :filter-profile-name="logProfileName" />
@@ -110,10 +126,10 @@ const handleQRCode = (profileId) => {
 
     <Modal v-model:show="showDeleteProfilesModal" @confirm="handleDeleteAllProfiles">
       <template #title>
-        <h3 class="text-lg font-bold text-red-500">确认清空订阅组</h3>
+        <h3 class="text-lg font-bold text-red-500">{{ t('profiles.deleteAllConfirmTitle') }}</h3>
       </template>
       <template #body>
-        <p class="text-sm text-gray-400">您确定要删除所有**订阅组**吗？此操作不可逆。</p>
+        <p class="text-sm text-gray-400">{{ t('profiles.deleteAllConfirmBody') }}</p>
       </template>
     </Modal>
 

@@ -5,6 +5,9 @@ import ManualNodeCard from '../ManualNodeCard.vue';
 import ManualNodeList from '../ManualNodeList.vue';
 import PanelPagination from '@/components/shared/PanelPagination.vue';
 import EmptyState from '@/components/ui/EmptyState.vue';
+import { useI18n } from '@/i18n/index.js';
+
+const { t } = useI18n();
 
 const props = defineProps({
   manualNodes: { type: Array, default: () => [] },
@@ -22,7 +25,8 @@ const props = defineProps({
   draggableManualNodes: { type: Array, default: () => [] },
   itemsPerPage: { type: Number, default: 24 }, // Added
   pingResults: { type: Object, default: () => ({}) },
-  pingingNodes: { type: Object, default: () => new Set() }
+  pingingNodes: { type: Object, default: () => new Set() },
+  compactGrid: { type: Boolean, default: false }
 });
 
 const emit = defineEmits([
@@ -58,8 +62,8 @@ const handleChangePage = (page) => {
 <template>
   <div v-if="manualNodes.length > 0" :class="{ 'pb-48': isSelectionMode }">
     <!-- 如果有搜索词，显示搜索提示 -->
-    <div v-if="localSearchTerm && filteredNodes.length === 0" class="text-center py-8 text-gray-500">
-      <p>没有找到包含 "{{ localSearchTerm }}" 的节点</p>
+    <div v-if="localSearchTerm && filteredNodes.length === 0" class="rounded-xl border border-dashed border-gray-300 bg-white/60 py-8 text-center text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-400">
+      {{ t('manualNodes.noSearchResult', { keyword: localSearchTerm }) }}
     </div>
     
     <div v-if="isSorting">
@@ -67,7 +71,8 @@ const handleChangePage = (page) => {
       <div v-if="viewMode === 'card'">
         <draggable 
           tag="div" 
-          class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3 gap-4" 
+          class="grid gap-4"
+          :class="compactGrid ? 'grid-cols-1 md:grid-cols-2 xl:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3'"
           v-model="draggableModel" 
           item-key="id" 
           animation="300" 
@@ -121,7 +126,7 @@ const handleChangePage = (page) => {
 
     <div v-else>
       <!-- Flat List Display (No Groups) -->
-      <div v-if="viewMode === 'card'" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3 gap-4">
+      <div v-if="viewMode === 'card'" class="grid gap-4" :class="compactGrid ? 'grid-cols-1 md:grid-cols-2 xl:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3'">
         <div 
           v-for="(node, index) in paginatedNodes" 
           :key="node.id"
@@ -175,10 +180,10 @@ const handleChangePage = (page) => {
       @update:items-per-page="emit('update:itemsPerPage', $event)"
     />
   </div>
-  <div v-else class="py-6 border-2 border-dashed border-gray-300 dark:border-gray-700 bg-white/60 dark:bg-gray-900/50 misub-radius-lg">
-    <EmptyState 
-      title="没有手动节点" 
-      description="添加分享链接或单个节点。" 
+    <div v-else class="rounded-xl border border-dashed border-gray-300 bg-white/60 py-6 dark:border-gray-700 dark:bg-gray-900/50">
+      <EmptyState 
+        :title="t('manualNodes.empty')"
+        :description="t('manualNodes.emptyDesc')"
       icon="node" 
       :total-count="0" 
     />

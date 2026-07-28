@@ -32,24 +32,17 @@ export function hasDataChanged(oldData, newData) {
 }
 
 /**
- * 获取 KV namespace
- * EdgeOne Pages: KV 作为全局变量注入（如 MISUB_KV），而非通过 env
- * Cloudflare Pages: KV 通过 env.MISUB_KV 注入
+ * 获取 KV namespace。
+ * 仅从 Cloudflare Pages 的 env 绑定读取。
  * @param {Object} env
  * @returns {Object|null}
  */
 function getKV(env) {
-    // Cloudflare 方式
-    if (env?.MISUB_KV) return env.MISUB_KV;
-    // EdgeOne 方式：全局变量
-    try {
-        if (typeof MISUB_KV !== 'undefined' && MISUB_KV) return MISUB_KV; // eslint-disable-line no-undef
-    } catch (_) {}
-    return null;
+    return env?.MISUB_KV || null;
 }
 
 /**
- * 读取运行时环境变量（兼容 Cloudflare/EdgeOne）
+ * 读取运行时环境变量。
  * @param {Object} env
  * @param {string} key
  * @returns {string|undefined}
@@ -60,13 +53,6 @@ function getRuntimeEnvValue(env, key) {
         return String(envValue);
     }
 
-    try {
-        const globalValue = globalThis?.[key];
-        if (globalValue !== undefined && globalValue !== null && String(globalValue).trim() !== '') {
-            return String(globalValue);
-        }
-    } catch (_) {}
-
     return undefined;
 }
 
@@ -74,7 +60,9 @@ function isStorageUnavailableError(error) {
     const message = String(error?.message || error || '').toLowerCase();
     return message.includes('kv storage is paused')
         || message.includes('storage is paused')
-        || message.includes('namespace is paused');
+        || message.includes('namespace is paused')
+        || message.includes('kv put() limit exceeded')
+        || message.includes('put() limit exceeded for the day');
 }
 
 async function safeKvGet(kv, key) {
@@ -137,7 +125,7 @@ export async function conditionalKVPut(env, key, newData, oldData = null) {
 /**
  * 获取或生成 Cookie 加密密钥
  * 优先顺序：KV → 环境变量 COOKIE_SECRET → 随机生成（无 KV 时仅内存有效）
- * @param {Object} env - 运行时环境对象（Cloudflare / EdgeOne）
+ * @param {Object} env - 运行时环境对象
  * @returns {Promise<string>} 密钥
  */
 export async function getCookieSecret(env) {
@@ -169,7 +157,7 @@ export async function getCookieSecret(env) {
 /**
  * 获取管理员密码
  * 优先顺序：环境变量 ADMIN_PASSWORD → KV → 默认值 'admin'
- * @param {Object} env - 运行时环境对象（Cloudflare / EdgeOne）
+ * @param {Object} env - 运行时环境对象
  * @returns {Promise<string>} 密码
  */
 export async function getAdminPassword(env) {
@@ -249,7 +237,7 @@ export async function isUsingDefaultPassword(env) {
 
 /**
  * 设置管理员密码
- * 有 KV 时持久化到 KV；无 KV 时（EdgeOne 纯环境变量模式）抛出提示
+ * 有 KV 时持久化到 KV；无 KV 时抛出提示
  * @param {Object} env - 运行时环境对象
  * @param {string} newPassword - 新密码
  */
@@ -321,11 +309,24 @@ import { SYSTEM_CONSTANTS } from './config.js';
 export function getProcessedUserAgent(originalUserAgent, url = '') {
     if (!originalUserAgent) return originalUserAgent;
 
-    // CF-Workers-SUB的精华策略：
-    // 统一使用v2rayN UA获取订阅，绕过机场过滤同时保证获取完整节点
-    return SYSTEM_CONSTANTS.FETCHER_USER_AGENT;
-}
+    const rawUrl = typeof url === 'string' ? url : '';
+    try {
+        const parsedUrl = new URL(rawUrl);
+        const params = parsedUrl.searchParams;
+        if (params.has('clash') || params.get('target')?.toLowerCase() === 'clash') {
+            return 'clash-verge/v2.4.3';
+        }
+    } catch {
+        if (/[?&](?:clash(?:=|&|$)|target=clash(?:&|$))/i.test(rawUrl)) {
+            return 'clash-verge/v2.4.3';
+        }
+    }
 
+    // CF-Workers-SUB的精华策略：
+    // 默认使用 v2rayN UA 获取订阅，绕过多数机场过滤同时保证获取完整节点。
+    // 个别 Clash 专用链接（如 ?clash=2）会严格校验 UA，需要保留 Clash UA。
+    return 'v2rayN/7.23';
+}
 /**
  * 名称前缀辅助函数
  * @param {string} link - 节点链接
@@ -523,11 +524,19 @@ export function migrateConfigSettings(config) {
     if (migratedConfig.hasOwnProperty('enableTrafficNode')) {
         migratedConfig.enableTrafficNode = toBoolean(migratedConfig.enableTrafficNode);
     }
-    if (migratedConfig.hasOwnProperty('subConverterScv')) {
-        migratedConfig.subConverterScv = toBoolean(migratedConfig.subConverterScv);
+    // [Migration] 映射旧名到新名（如果新名不存在且旧名存在）
+    if (!migratedConfig.hasOwnProperty('builtinSkipCertVerify') && migratedConfig.hasOwnProperty('transformBackendScv')) {
+        migratedConfig.builtinSkipCertVerify = toBoolean(migratedConfig.transformBackendScv);
     }
-    if (migratedConfig.hasOwnProperty('subConverterUdp')) {
-        migratedConfig.subConverterUdp = toBoolean(migratedConfig.subConverterUdp);
+    if (!migratedConfig.hasOwnProperty('builtinEnableUdp') && migratedConfig.hasOwnProperty('transformBackendUdp')) {
+        migratedConfig.builtinEnableUdp = toBoolean(migratedConfig.transformBackendUdp);
+    }
+
+    if (migratedConfig.hasOwnProperty('builtinSkipCertVerify')) {
+        migratedConfig.builtinSkipCertVerify = toBoolean(migratedConfig.builtinSkipCertVerify);
+    }
+    if (migratedConfig.hasOwnProperty('builtinEnableUdp')) {
+        migratedConfig.builtinEnableUdp = toBoolean(migratedConfig.builtinEnableUdp);
     }
     if (migratedConfig.hasOwnProperty('builtinLoonSkipCertVerify')) {
         migratedConfig.builtinLoonSkipCertVerify = toBoolean(migratedConfig.builtinLoonSkipCertVerify);
@@ -549,9 +558,6 @@ export function createJsonResponse(data, status = 200, headers = {}) {
         status,
         headers: {
             'Content-Type': 'application/json; charset=utf-8',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             ...headers
         }
     });
@@ -606,6 +612,38 @@ export function escapeHtml(str) {
         .replace(/'/g, '&#039;');
 }
 
+export const JSON_BODY_LIMITS = {
+    auth: 16 * 1024,
+    small: 128 * 1024,
+    normal: 1024 * 1024,
+    large: 5 * 1024 * 1024
+};
+
+export class RequestBodyTooLargeError extends Error {
+    constructor(limitBytes) {
+        super(`Request JSON body too large (max ${limitBytes} bytes)`);
+        this.name = 'RequestBodyTooLargeError';
+        this.status = 413;
+        this.code = 'REQUEST_BODY_TOO_LARGE';
+    }
+}
+
+export async function readJsonWithLimit(request, limitBytes = JSON_BODY_LIMITS.normal) {
+    const contentLength = request?.headers?.get?.('Content-Length') || request?.headers?.get?.('content-length');
+    if (contentLength) {
+        const declaredBytes = Number(contentLength);
+        if (Number.isFinite(declaredBytes) && declaredBytes > limitBytes) {
+            throw new RequestBodyTooLargeError(limitBytes);
+        }
+    }
+
+    const text = await request.text();
+    if (new TextEncoder().encode(text).length > limitBytes) {
+        throw new RequestBodyTooLargeError(limitBytes);
+    }
+    return text ? JSON.parse(text) : {};
+}
+
 /**
  * 创建标准错误响应
  * @param {Error|string} error - 错误对象或错误消息
@@ -653,4 +691,34 @@ export function migrateProfileIds(profiles) {
         }
     }
     return migrated;
+}
+
+/**
+ * 安全的 UTF-8 到 Base64 编码 (替代已弃用的 unescape/encodeURIComponent 方案)
+ */
+export function base64EncodeUtf8(str) {
+    if (!str) return '';
+    try {
+        const bytes = new TextEncoder().encode(str);
+        const binString = Array.from(bytes, b => String.fromCharCode(b)).join('');
+        return btoa(binString);
+    } catch (e) {
+        console.error('[Utils] base64EncodeUtf8 failed:', e);
+        return '';
+    }
+}
+
+/**
+ * 安全的 Base64 到 UTF-8 解码
+ */
+export function base64DecodeUtf8(base64) {
+    if (!base64) return '';
+    try {
+        const binString = atob(base64.replace(/-/g, '+').replace(/_/g, '/'));
+        const bytes = Uint8Array.from(binString, m => m.charCodeAt(0));
+        return new TextDecoder().decode(bytes);
+    } catch (e) {
+        console.error('[Utils] base64DecodeUtf8 failed:', e);
+        return '';
+    }
 }

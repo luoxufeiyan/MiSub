@@ -3,9 +3,78 @@ import { createJsonResponse } from '../utils.js';
 import { parseNodeInfo } from '../utils/geo-utils.js';
 import { calculateProtocolStats, calculateRegionStats } from '../utils/node-parser.js';
 import { applyNodeTransformPipeline } from '../../utils/node-transformer.js';
-import { KV_KEY_SUBS, KV_KEY_PROFILES } from '../config.js';
+import { runOperatorChain } from '../../utils/operator-runner.js';
+import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS } from '../config.js';
 import { fetchSubscriptionNodes } from './node-fetcher.js';
 import { applyManualNodeName } from '../utils/node-cleaner.js';
+
+function ensureArray(data) {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    if (typeof data === 'string') {
+        try {
+            const parsed = JSON.parse(data);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    }
+    return [];
+}
+
+function adaptLegacyTransform(config) {
+    if (!config || !config.enabled) return [];
+
+    const ops = [];
+    const filter = config.filter;
+    if (filter && (filter.include?.enabled || filter.exclude?.enabled || filter.protocols?.enabled || filter.regions?.enabled || filter.script?.enabled || filter.useless?.enabled)) {
+        ops.push({ id: 'legacy-filter', type: 'filter', enabled: true, params: { ...filter } });
+    }
+
+    const regex = config.rename?.regex;
+    if (regex?.enabled && regex.rules?.length > 0) {
+        ops.push({ id: 'legacy-rename-regex', type: 'rename', enabled: true, params: { regex: { ...regex } } });
+    }
+
+    const template = config.rename?.template;
+    if (template?.enabled) {
+        ops.push({
+            id: 'legacy-rename-template',
+            type: 'rename',
+            enabled: true,
+            params: {
+                template: {
+                    enabled: true,
+                    template: template.template || '{emoji}{region}-{protocol}-{index}',
+                    offset: template.indexStart || 1,
+                    indexScope: template.indexScope || 'region'
+                }
+            }
+        });
+    }
+
+    const renameScript = config.rename?.script;
+    if (renameScript?.enabled && renameScript.expression) {
+        ops.push({
+            id: 'legacy-rename-script',
+            type: 'script',
+            enabled: true,
+            params: { dsl: [{ action: 'rename', template: renameScript.expression }] }
+        });
+    }
+
+    const dedup = config.dedup;
+    if (dedup?.enabled) {
+        ops.push({ id: 'legacy-dedup', type: 'dedup', enabled: true, params: { ...dedup } });
+    }
+
+    const sort = config.sort;
+    if (sort?.enabled && sort.keys?.length > 0) {
+        ops.push({ id: 'legacy-sort', type: 'sort', enabled: true, params: { ...sort } });
+    }
+
+    return ops;
+}
 
 /**
  * 处理订阅组模式的节点获取
@@ -19,19 +88,23 @@ import { applyManualNodeName } from '../utils/node-cleaner.js';
 export async function handleProfileMode(request, env, profileId, userAgent, applyTransform = false, skipCertVerify = false) {
     const storageAdapter = StorageFactory.createAdapter(env, await StorageFactory.getStorageType(env));
 
-    // 获取订阅组和所有数据
-    const allProfiles = await storageAdapter.get(KV_KEY_PROFILES) || [];
-    const allSubscriptions = await storageAdapter.get(KV_KEY_SUBS) || [];
-
-    // 查找匹配的订阅组
-    const profile = allProfiles.find(p => (p.customId && p.customId === profileId) || p.id === profileId);
+    const profile = typeof storageAdapter.getProfileById === 'function'
+        ? await storageAdapter.getProfileById(profileId)
+        : (await storageAdapter.get(KV_KEY_PROFILES) || []).find(p => (p.customId && p.customId === profileId) || p.id === profileId);
+    const settings = await storageAdapter.get(KV_KEY_SETTINGS) || DEFAULT_SETTINGS;
 
     if (!profile || !profile.enabled) {
         return createJsonResponse({ error: '订阅组不存在或已禁用' }, 404);
     }
 
-    // Create a map for quick lookup
-    const misubMap = new Map(allSubscriptions.map(item => [item.id, item]));
+    const relatedIds = [
+        ...(Array.isArray(profile.subscriptions) ? profile.subscriptions.map(item => typeof item === 'object' ? item.id : item) : []),
+        ...(Array.isArray(profile.manualNodes) ? profile.manualNodes : [])
+    ].filter(Boolean);
+    const relatedSubs = typeof storageAdapter.getSubscriptionsByIds === 'function'
+        ? await storageAdapter.getSubscriptionsByIds(Array.from(new Set(relatedIds)))
+        : await storageAdapter.get(KV_KEY_SUBS) || [];
+    const misubMap = new Map(relatedSubs.map(item => [item.id, item]));
 
     const targetMisubs = [];
 
@@ -71,12 +144,14 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
         const nodeInfo = parseNodeInfo(effectiveUrl);
         return {
             subscriptionName: node.name || '手工节点',
+            group: node.group || '',
             url: effectiveUrl,
             success: true,
             nodes: [{
                 ...nodeInfo,
                 url: effectiveUrl,
-                subscriptionName: node.name || '手工节点'
+                subscriptionName: node.name || '手工节点',
+                group: node.group || ''
             }],
             error: null,
             isManualNode: true
@@ -85,7 +160,7 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
 
     // 并行获取HTTP订阅节点
     const subscriptionResults = await Promise.all(
-        targetSubscriptions.map(sub => fetchSubscriptionNodes(sub.url, sub.name, userAgent, sub.customUserAgent, false, sub.exclude, sub.fetchProxy, skipCertVerify, Boolean(sub?.plusAsSpace)))
+        targetSubscriptions.map(sub => fetchSubscriptionNodes(sub.url, sub.name, userAgent, sub.customUserAgent, false, sub.exclude, sub.fetchProxy, skipCertVerify, Boolean(sub?.plusAsSpace), sub?.enableNodeCache === true))
     );
 
     // 合并所有结果
@@ -101,26 +176,49 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
 
     // 如果需要应用转换规则，则处理节点名称
     let processedNodes = allNodes;
-    if (applyTransform && profile.nodeTransform?.enabled) {
-        // 提取节点 URL 列表
+    const presetNodeTransform = profile.nodeTransformPresetId
+        ? (Array.isArray(settings.nodeTransformPresets) ? settings.nodeTransformPresets.find(item => item?.id === profile.nodeTransformPresetId)?.config : null)
+        : null;
+    const effectiveNodeTransform = profile.nodeTransform?.enabled ? profile.nodeTransform : presetNodeTransform;
+
+    if (applyTransform) {
         const nodeUrls = allNodes.map(node => node.url);
+        const nodeMetadataByUrl = new Map(allNodes.map(node => [node.url, { group: node.group || '' }]));
 
-        // 应用节点转换管道
-        // 使用默认模板 '{emoji}{region}-{protocol}-{index}'，如果用户未自定义模板
-        const defaultTemplate = '{emoji}{region}-{protocol}-{index}';
-        const effectiveTemplate = profile.nodeTransform.rename?.template?.template || defaultTemplate;
-        const transformedUrls = applyNodeTransformPipeline(nodeUrls, {
-            ...profile.nodeTransform,
-            enableEmoji: effectiveTemplate.includes('{emoji}')
-        });
+        let activeOperators = ensureArray(profile?.operators);
+        if (!activeOperators.length && profile?.nodeTransform?.enabled && profile.nodeTransform?.operators) {
+            activeOperators = ensureArray(profile.nodeTransform.operators);
+        }
+        if (!activeOperators.length && settings?.defaultOperators) {
+            activeOperators = ensureArray(settings.defaultOperators);
+        }
+        if (!activeOperators.length && effectiveNodeTransform?.enabled) {
+            activeOperators = adaptLegacyTransform({
+                ...effectiveNodeTransform,
+                enableEmoji: settings.enableFlagEmoji !== false
+            });
+        }
 
-        // 重要修复：由于节点转换管道可能会重新排序节点，
-        // 不能用原始索引匹配转换后的 URL，必须从转换后的 URL 重新解析所有节点信息
+        let transformedUrls = nodeUrls;
+        if (activeOperators.length > 0) {
+            transformedUrls = await runOperatorChain(nodeUrls, activeOperators, {
+                subName: profile?.name,
+                userAgent,
+                config: settings,
+                nodeMetadataByUrl
+            });
+        } else if (effectiveNodeTransform?.enabled) {
+            const defaultTemplate = '{emoji}{region}-{protocol}-{index}';
+            const effectiveTemplate = effectiveNodeTransform.rename?.template?.template || defaultTemplate;
+            transformedUrls = applyNodeTransformPipeline(nodeUrls, {
+                ...effectiveNodeTransform,
+                enableEmoji: settings.enableFlagEmoji !== false && effectiveTemplate.includes('{emoji}')
+            });
+        }
+
         processedNodes = transformedUrls.map(transformedUrl => {
             const nodeInfo = parseNodeInfo(transformedUrl);
-            // 尝试找到原始节点以保留 subscriptionName
             const originalNode = allNodes.find(n => {
-                // 通过 URL 的核心部分（服务器和端口）进行匹配
                 try {
                     const origUrl = new URL(n.url);
                     const transUrl = new URL(transformedUrl);

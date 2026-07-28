@@ -4,6 +4,7 @@ import BulkOperations from './ManualNodePanel/BulkOperations.vue';
 import NodeActions from './ManualNodePanel/NodeActions.vue';
 import NodeTable from './ManualNodePanel/NodeTable.vue';
 import { useManualNodeSearchPagination } from '@/composables/manual-nodes/useManualNodeSearchPagination.js';
+import { normalizeManualNodeGroupName } from '@/composables/manual-nodes/groups.js';
 
 const props = defineProps({
   manualNodes: { type: Array, default: () => [] },
@@ -17,7 +18,8 @@ const props = defineProps({
   activeGroupFilter: { type: String, default: null }, // New
   itemsPerPage: { type: Number, default: 24 }, // Added
   pingResults: { type: Object, default: () => ({}) },
-  pingingNodes: { type: Object, default: () => new Set() }
+  pingingNodes: { type: Object, default: () => new Set() },
+  compactGrid: { type: Boolean, default: false }
 });
 
 const emit = defineEmits([
@@ -27,7 +29,8 @@ const emit = defineEmits([
   'update:itemsPerPage', // Added
   'open-batch-group-modal', // Added
   'ping',
-  'ping-all'
+  'ping-all',
+  'manage-groups'
 ]);
 
 const isSelectionMode = ref(false);
@@ -96,8 +99,20 @@ const handleBatchDelete = () => {
     isSelectionMode.value = false;
 };
 
+const sortableManualNodes = computed(() => {
+  const activeGroup = props.activeGroupFilter;
+  let nodes = filteredNodes.value;
+
+  if (activeGroup) {
+    const normalizedActiveGroup = activeGroup === '默认' ? '' : normalizeManualNodeGroupName(activeGroup);
+    nodes = nodes.filter((node) => normalizeManualNodeGroupName(node.group) === normalizedActiveGroup);
+  }
+
+  return nodes;
+});
+
 const draggableManualNodes = computed({
-  get: () => [...props.manualNodes],
+  get: () => (props.isSorting ? [...sortableManualNodes.value] : [...props.manualNodes]),
   set: (val) => emit('reorder', val)
 });
 
@@ -163,6 +178,7 @@ const handleDeleteAll = () => {
       @delete-all="handleDeleteAll"
       @toggle-selection-mode="toggleSelectionMode"
       @ping-all="emit('ping-all')"
+      @manage-groups="emit('manage-groups')"
     />
 
     <BulkOperations
@@ -200,6 +216,7 @@ const handleDeleteAll = () => {
       @set-group-filter="emit('set-group-filter', $event)"
       :ping-results="pingResults"
       :pinging-nodes="pingingNodes"
+      :compact-grid="compactGrid"
       @ping="emit('ping', $event)"
     />
   </div>

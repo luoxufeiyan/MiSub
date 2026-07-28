@@ -10,8 +10,9 @@
  * 5. 完善的 [General] 与 [Rule] 规则
  */
 
-import { urlToClashProxy } from '../../utils/url-to-clash.js';
+import { urlToClashProxy, urlsToClashProxies } from '../../utils/url-to-clash.js';
 import { getUniqueName } from './name-utils.js';
+import { POLICY_GROUPS, getBuiltinRules, getRemoteProviderDefinitions, DEFAULT_SELECT_GROUP, DEFAULT_RELAY_GROUP, pruneProxyGroups } from './builtin-rules-provider.js';
 
 /**
  * 清理控制字符
@@ -37,11 +38,14 @@ function sanitizeNodeName(name) {
  * 参数值加引号（如果包含特殊字符）
  */
 function loonQuote(value) {
-    if (!value) return '';
-    if (/[,\s"=]/.test(value)) {
-        return `"${value.replace(/"/g, '\\"')}"`;
+    if (value === undefined || value === null) return '';
+    const strValue = String(value);
+    // 如果包含逗号、空格、等号、引号，则需要加双引号并转义内部引号
+    // Loon 原生 INI 格式中，如果值包含等号或逗号，必须加引号
+    if (/[,\s"=]/.test(strValue)) {
+        return `"${strValue.replace(/"/g, '\\"')}"`;
     }
-    return value;
+    return strValue;
 }
 
 /**
@@ -83,32 +87,50 @@ function clashProxyToLoonResult(proxy) {
         parts.push(loonQuote(proxy.password || ''));
         
         if (proxy.udp) parts.push('udp-relay=true');
-        if (proxy.obfs) {
-            parts.push(`obfs=${proxy.obfs}`);
-            if (proxy['obfs-host']) parts.push(`obfs-host=${proxy['obfs-host']}`);
+        
+        // 插件支持
+        const plugin = proxy.plugin || '';
+        const opts = proxy['plugin-opts'] || proxy.pluginOpts || {};
+
+        if (plugin === 'obfs-local' || proxy.obfs) {
+            parts.push(`obfs-name=${proxy.obfs || opts.mode}`);
+            const host = proxy['obfs-host'] || opts.host;
+            if (host) parts.push(`obfs-host=${loonQuote(host)}`);
+            const uri = proxy['obfs-uri'] || opts.uri;
+            if (uri) parts.push(`obfs-uri=${loonQuote(uri)}`);
+        } else if (plugin === 'v2ray-plugin' || opts.mode === 'websocket') {
+            // v2ray-plugin 在 Loon 中映射为 transport=ws
+            parts.push('transport=ws');
+            if (opts.path) parts.push(`path=${loonQuote(opts.path)}`);
+            if (opts.host) parts.push(`host=${loonQuote(opts.host)}`);
+            if (opts.tls || opts.mode === 'websocket-tls') parts.push('over-tls=true');
         }
     } else if (type === 'vmess') {
         parts.push(`${name} = vmess`);
         parts.push(server);
         parts.push(String(port));
-        parts.push(proxy.uuid || '');
+        parts.push(proxy.cipher || 'auto');
+        parts.push(`"${proxy.uuid || ''}"`);
         
-        if (proxy.tls) parts.push('tls=true');
+        // 官方文档 VMess WS 示例中包含了 alterId=0
+        parts.push('alterId=0');
+
+        if (proxy.tls) parts.push('over-tls=true');
         if (proxy.network === 'ws') {
             parts.push('transport=ws');
             const wsOpts = proxy['ws-opts'] || proxy.wsOpts;
-            if (wsOpts?.path) parts.push(`path=${wsOpts.path}`);
-            if (wsOpts?.headers?.Host) parts.push(`host=${wsOpts.headers.Host}`);
+            if (wsOpts?.path) parts.push(`path=${loonQuote(wsOpts.path)}`);
+            if (wsOpts?.headers?.Host) parts.push(`host=${loonQuote(wsOpts.headers.Host)}`);
         }
         appendTlsParams(parts, proxy);
     } else if (type === 'vless') {
         parts.push(`${name} = vless`);
         parts.push(server);
         parts.push(String(port));
-        parts.push(proxy.uuid || '');
+        parts.push(`"${proxy.uuid || ''}"`);
 
         if (proxy.flow) {
-            parts.push(`flow=${proxy.flow}`);
+            parts.push(`flow=${loonQuote(proxy.flow)}`);
         }
 
         if (proxy.network) {
@@ -116,26 +138,29 @@ function clashProxyToLoonResult(proxy) {
             
             if (proxy.network === 'ws') {
                 const wsOpts = proxy['ws-opts'] || proxy.wsOpts;
-                if (wsOpts?.path) parts.push(`path=${wsOpts.path}`);
-                if (wsOpts?.headers?.Host) parts.push(`host=${wsOpts.headers.Host}`);
+                if (wsOpts?.path) parts.push(`path=${loonQuote(wsOpts.path)}`);
+                if (wsOpts?.headers?.Host) parts.push(`host=${loonQuote(wsOpts.headers.Host)}`);
             } else if (proxy.network === 'grpc') {
                 const grpcOpts = proxy['grpc-opts'] || proxy.grpcOpts;
-                if (grpcOpts?.['grpc-service-name']) parts.push(`grpc-service-name=${grpcOpts['grpc-service-name']}`);
+                if (grpcOpts?.['grpc-service-name']) parts.push(`grpc-service-name=${loonQuote(grpcOpts['grpc-service-name'])}`);
             } else if (proxy.network === 'xhttp') {
                 const xhttpOpts = proxy['xhttp-opts'] || proxy.xhttpOpts;
-                if (xhttpOpts?.path) parts.push(`path=${xhttpOpts.path}`);
-                if (xhttpOpts?.host) parts.push(`host=${xhttpOpts.host}`);
-                if (xhttpOpts?.mode) parts.push(`mode=${xhttpOpts.mode}`);
+                if (xhttpOpts?.path) parts.push(`path=${loonQuote(xhttpOpts.path)}`);
+                if (xhttpOpts?.host) parts.push(`host=${loonQuote(xhttpOpts.host)}`);
+                if (xhttpOpts?.mode) parts.push(`mode=${loonQuote(xhttpOpts.mode)}`);
             }
+        } else {
+            // VLESS 官方文档中常用 transport=tcp
+            parts.push('transport=tcp');
         }
 
         if (proxy.tls || proxy.security === 'reality') {
-            parts.push('tls=true');
+            parts.push('over-tls=true');
             const realityOpts = proxy['reality-opts'] || proxy.realityOpts;
             if (realityOpts) {
                 parts.push('reality=true');
-                if (realityOpts['public-key']) parts.push(`public-key=${realityOpts['public-key']}`);
-                if (realityOpts['short-id']) parts.push(`short-id=${realityOpts['short-id']}`);
+                if (realityOpts['public-key']) parts.push(`public-key=${loonQuote(realityOpts['public-key'])}`);
+                if (realityOpts['short-id']) parts.push(`short-id=${loonQuote(realityOpts['short-id'])}`);
             }
         }
         appendTlsParams(parts, proxy);
@@ -145,11 +170,14 @@ function clashProxyToLoonResult(proxy) {
         parts.push(String(port));
         parts.push(loonQuote(proxy.password || ''));
         
+        // 深度审计：官方文档 Trojan WS 示例并没有 over-tls=true
+        // Trojan 本身即为 TLS 协议，手动添加可能导致二次包裹错误
+
         if (proxy.network === 'ws') {
             parts.push('transport=ws');
             const wsOpts = proxy['ws-opts'] || proxy.wsOpts;
-            if (wsOpts?.path) parts.push(`path=${wsOpts.path}`);
-            if (wsOpts?.headers?.Host) parts.push(`host=${wsOpts.headers.Host}`);
+            if (wsOpts?.path) parts.push(`path=${loonQuote(wsOpts.path)}`);
+            if (wsOpts?.headers?.Host) parts.push(`host=${loonQuote(wsOpts.headers.Host)}`);
         }
         appendTlsParams(parts, proxy);
     } else if (type === 'hysteria2' || type === 'hy2') {
@@ -162,8 +190,8 @@ function clashProxyToLoonResult(proxy) {
         parts.push(`${name} = tuic`);
         parts.push(server);
         parts.push(String(port));
-        parts.push(proxy.token || proxy.uuid || '');
-        if (proxy.password) parts.push(`password=${proxy.password}`);
+        parts.push(loonQuote(proxy.token || proxy.uuid || ''));
+        if (proxy.password) parts.push(`password=${loonQuote(proxy.password)}`);
         appendTlsParams(parts, proxy);
     } else if (type === 'wireguard') {
         parts.push(`${name} = wireguard`);
@@ -171,8 +199,8 @@ function clashProxyToLoonResult(proxy) {
         parts.push(String(port));
         parts.push(proxy['private-key']);
         if (proxy.ip) {
-            const ip = Array.isArray(proxy.ip) ? proxy.ip[0] : proxy.ip;
-            parts.push(`self-ip=${ip}`);
+            const ipAddr = Array.isArray(proxy.ip) ? proxy.ip[0] : proxy.ip;
+            parts.push(`self-ip=${ipAddr}`);
         }
         if (proxy['public-key']) parts.push(`public-key=${proxy['public-key']}`);
         if (proxy.mtu) parts.push(`mtu=${proxy.mtu}`);
@@ -184,20 +212,26 @@ function clashProxyToLoonResult(proxy) {
         parts.push(`${name} = snell`);
         parts.push(server);
         parts.push(String(port));
-        parts.push(proxy.psk || proxy.password || '');
+        if (proxy.psk || proxy.password) parts.push(`psk=${loonQuote(proxy.psk || proxy.password)}`);
         if (proxy.version) parts.push(`version=${proxy.version}`);
-        // 连接复用（Snell V3+ 支持）
         if (proxy.reuse !== undefined) parts.push(`reuse=${proxy.reuse}`);
-        // TCP Fast Open
         if (proxy.tfo !== undefined) parts.push(`tfo=${proxy.tfo}`);
-        // 混淆参数
         const obfsOpts = proxy['obfs-opts'];
         if (obfsOpts) {
-            if (obfsOpts.mode && obfsOpts.mode !== 'none') parts.push(`obfs=${obfsOpts.mode}`);
-            if (obfsOpts.host) parts.push(`obfs-host=${obfsOpts.host}`);
+            if (obfsOpts.mode && obfsOpts.mode !== 'none') parts.push(`obfs=${loonQuote(obfsOpts.mode)}`);
+            if (obfsOpts.host) parts.push(`obfs-host=${loonQuote(obfsOpts.host)}`);
         }
     } else {
         return null;
+    }
+
+    // TCP Fast Open
+    if (proxy.tfo) {
+        // Loon 大部分节点使用 fast-open=true
+        // 注意：Snell 在上面已经处理过 tfo= 了，这里避免冲突
+        if (type !== 'snell' && !parts.some(p => p.startsWith('fast-open=') || p.startsWith('tfo='))) {
+            parts.push('fast-open=true');
+        }
     }
 
     // 添加节点图标
@@ -211,29 +245,33 @@ function clashProxyToLoonResult(proxy) {
 
 function appendTlsParams(parts, proxy) {
     if (proxy.sni || proxy.servername) {
-        parts.push(`sni=${proxy.sni || proxy.servername}`);
+        parts.push(`sni=${loonQuote(proxy.sni || proxy.servername)}`);
     }
     if (proxy['skip-cert-verify'] === true || proxy.skipCertVerify === true) {
         parts.push('skip-cert-verify=true');
     }
     if (proxy.alpn) {
         const alpnStr = Array.isArray(proxy.alpn) ? proxy.alpn[0] : proxy.alpn;
-        parts.push(`alpn=${alpnStr}`);
+        parts.push(`alpn=${loonQuote(alpnStr)}`);
     }
     if (proxy['client-fingerprint']) {
-        parts.push(`client-fingerprint=${proxy['client-fingerprint']}`);
+        parts.push(`client-fingerprint=${loonQuote(proxy['client-fingerprint'])}`);
     }
 }
+
 
 /**
  * 生成内置 Loon 配置
  */
+
 export function generateBuiltinLoonConfig(nodeList, options = {}) {
     const {
-        fileName = 'MiSub',
         managedConfigUrl = '',
         interval = 86400,
-        skipCertVerify = null
+        skipCertVerify = false,
+        enableUdp = false,
+        enableTfo = false,
+        ruleLevel = 'std'
     } = options;
 
     const cleanedNodeList = cleanControlChars(nodeList);
@@ -244,27 +282,16 @@ export function generateBuiltinLoonConfig(nodeList, options = {}) {
 
     const proxyLines = [];
     const proxyNames = [];
+    const proxiesWithMetadata = [];
     const usedNames = new Map();
 
-    // 分区域容器
-    const regionGroups = {
-        '🇭🇰 香港节点': /港|HK|Hong Kong/i,
-        '🇹🇼 台湾节点': /台|TW|Taiwan/i,
-        '🇯🇵 日本节点': /日|JP|Japan/i,
-        '🇸🇬 狮城节点': /狮城|新|SG|Singapore/i,
-        '🇺🇸 美国节点': /美|US|America/i,
-        '🇰🇷 韩国节点': /韩|KR|Korea/i,
-        '🇬🇧 英国节点': /英|UK|England/i,
-    };
-    const activeRegionGroups = {};
+    // 转换为 Clash 代理对象
+    const proxies = urlsToClashProxies(nodeUrls, options);
 
-    for (const url of nodeUrls) {
-        const clashProxy = urlToClashProxy(url);
-        if (!clashProxy) continue;
-
-        if (skipCertVerify === true) {
-            clashProxy['skip-cert-verify'] = true;
-        }
+    // 应用 UDP 开关
+    // (已在 urlsToClashProxies 中全局处理)
+    
+    for (const clashProxy of proxies) {
 
         const baseName = sanitizeNodeName(clashProxy.name);
         const uniqueName = getUniqueName(baseName, usedNames);
@@ -274,16 +301,7 @@ export function generateBuiltinLoonConfig(nodeList, options = {}) {
         if (line) {
             proxyLines.push(line);
             proxyNames.push(uniqueName);
-
-            // 归类
-            for (const [groupName, regex] of Object.entries(regionGroups)) {
-                if (regex.test(uniqueName)) {
-                    if (!activeRegionGroups[groupName]) {
-                        activeRegionGroups[groupName] = [];
-                    }
-                    activeRegionGroups[groupName].push(uniqueName);
-                }
-            }
+            proxiesWithMetadata.push(clashProxy);
         }
     }
 
@@ -292,13 +310,10 @@ export function generateBuiltinLoonConfig(nodeList, options = {}) {
     }
 
     const sections = [];
-
-    // #!MANAGED-CONFIG
     if (managedConfigUrl) {
         sections.push(`#!MANAGED-CONFIG ${managedConfigUrl} interval=${interval} strict=false`);
     }
 
-    // [General]
     sections.push(`[General]
 ipv6 = false
 dns-server = system, 223.5.5.5, 119.29.29.29
@@ -306,23 +321,39 @@ skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10
 proxy-test-url = http://www.gstatic.com/generate_204
 resource-parser = https://raw.githubusercontent.com/sub-store-org/Sub-Store/master/scripts/sub-store-parser.js`);
 
-    // [Proxy]
     sections.push(`[Proxy]\nDIRECT = direct\n${proxyLines.join('\n')}`);
 
-    // [Proxy Group]
-    const proxyNamesStr = proxyNames.join(', ');
-    const activeRegionNames = Object.keys(activeRegionGroups);
-    const regionGroupRefs = activeRegionNames.length > 0 ? `, ${activeRegionNames.join(', ')}` : '';
-    
-    const iconRepo = 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color';
-    const proxyGroupLines = [];
-    
-    // 主分组
-    proxyGroupLines.push(`📶 节点选择 = select, ♻️ 自动选择${regionGroupRefs}, ${proxyNamesStr}, DIRECT, icon=${iconRepo}/Proxy.png`);
-    proxyGroupLines.push(`♻️ 自动选择 = url-test, ${proxyNamesStr}, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50, icon=${iconRepo}/Speedtest.png`);
+    const levelKey = (ruleLevel || 'std').toUpperCase();
+    const policyFactory = POLICY_GROUPS[levelKey] || POLICY_GROUPS.STD;
+    let abstractGroups = policyFactory(proxiesWithMetadata, options);
+    if (levelKey === 'RELAY') {
+        abstractGroups = abstractGroups.map(group => group.name === '🔗 链式代理'
+            ? { ...group, type: 'relay', proxies: ['入口节点', '落地节点'] }
+            : group
+        );
+        if (!abstractGroups.some(group => group.name === '落地节点')) {
+            const proxyNames = proxiesWithMetadata.map(proxy => proxy.name);
+            abstractGroups.splice(abstractGroups.findIndex(group => group.name === '入口节点') + 1, 0, {
+                name: '落地节点',
+                type: 'select',
+                proxies: ['♻️ 自动选择', '👋 手动切换', 'DIRECT', ...proxyNames]
+            });
+        }
+    }
+    abstractGroups = pruneProxyGroups(abstractGroups, proxiesWithMetadata);
 
-    // 区域分组
-    const regionIcons = {
+    const iconRepo = 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color';
+    const groupIcons = {
+        [DEFAULT_SELECT_GROUP]: `${iconRepo}/Proxy.png`,
+        [DEFAULT_RELAY_GROUP]: `${iconRepo}/Proxy.png`,
+        '♻️ 自动选择': `${iconRepo}/Speedtest.png`,
+        '🔯 故障转移': `${iconRepo}/Relay.png`,
+        '🎬 视频广告': `${iconRepo}/Reject.png`,
+        '🎥 流媒体': `${iconRepo}/Video.png`,
+        '🍎 Apple': `${iconRepo}/Apple.png`,
+        'Ⓜ️ Microsoft': `${iconRepo}/Microsoft.png`,
+        '📲 Telegram': `${iconRepo}/Telegram.png`,
+        '🎧 Spotify': `${iconRepo}/Spotify.png`,
         '🇭🇰 香港节点': `${iconRepo}/Hong_Kong.png`,
         '🇹🇼 台湾节点': `${iconRepo}/Taiwan.png`,
         '🇯🇵 日本节点': `${iconRepo}/Japan.png`,
@@ -332,33 +363,30 @@ resource-parser = https://raw.githubusercontent.com/sub-store-org/Sub-Store/mast
         '🇬🇧 英国节点': `${iconRepo}/United_Kingdom.png`,
     };
 
-    for (const groupName of activeRegionNames) {
-        const nodesInGroup = activeRegionGroups[groupName].join(', ');
-        const icon = regionIcons[groupName] ? `, icon=${regionIcons[groupName]}` : '';
-        proxyGroupLines.push(`${groupName} = url-test, ${nodesInGroup}, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50${icon}`);
-    }
+    const proxyGroupLines = abstractGroups.map(group => {
+        let type = group.type === 'url-test' ? 'url-test' : 'select';
+        if (group.type === 'fallback') type = 'fallback';
+        if (group.type === 'relay') type = 'relay';
+
+        const proxies = group.proxies.join(', ');
+        const icon = groupIcons[group.name] ? `, icon=${groupIcons[group.name]}` : '';
+        const extra = type === 'url-test' || type === 'fallback' ? `, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50` : '';
+        return `${group.name} = ${type}, ${proxies}${extra}${icon}`;
+    });
 
     sections.push(`[Proxy Group]\n${proxyGroupLines.join('\n')}`);
 
-    // [Rule]
-    sections.push(`[Rule]
-# Apple
-RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Loon/Apple/Apple.list,DIRECT
-# Global Media
-RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Loon/GlobalMedia/GlobalMedia_No_Resolve.list,📶 节点选择
-# Telegram
-RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Loon/Telegram/Telegram.list,📶 节点选择
-# China
-RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Loon/China/China.list,DIRECT
-# Local Area Network
-IP-CIDR,192.168.0.0/16,DIRECT
-IP-CIDR,10.0.0.0/8,DIRECT
-IP-CIDR,172.16.0.0/12,DIRECT
-IP-CIDR,127.0.0.0/8,DIRECT
-# GeoIP
-GEOIP,CN,DIRECT
-# Final
-FINAL,📶 节点选择`);
+    const builtinRuleLines = getBuiltinRules(levelKey, 'loon');
+    const ruleLines = [
+        '# 基础分流',
+        'IP-CIDR,127.0.0.0/8,DIRECT',
+        'IP-CIDR,10.0.0.0/8,DIRECT',
+        'IP-CIDR,172.16.0.0/12,DIRECT',
+        'IP-CIDR,192.168.0.0/16,DIRECT',
+        ...builtinRuleLines,
+        `FINAL,${levelKey === 'RELAY' ? DEFAULT_RELAY_GROUP : DEFAULT_SELECT_GROUP}`
+    ];
+    sections.push(`[Rule]\n${ruleLines.filter(Boolean).join('\n')}`);
 
     return sections.join('\n\n') + '\n';
 }

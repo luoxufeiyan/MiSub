@@ -23,29 +23,31 @@ const routes = [
         meta: { title: '公开页', isPublic: true }
     },
     {
-        path: '/dashboard', // Explicit dashboard route redirects to home or is alias
-        redirect: '/'
+        path: '/dashboard',
+        name: 'Dashboard',
+        component: DashboardView,
+        meta: { title: '仪表盘' }
     },
     {
-        path: '/groups',
+        path: '/dashboard/groups',
         name: 'SubscriptionGroups',
         component: SubscriptionGroupsView,
         meta: { title: '订阅组' }
     },
     {
-        path: '/nodes',
+        path: '/dashboard/nodes',
         name: 'ManualNodes',
         component: ManualNodesView,
-        meta: { title: '手工节点' }
+        meta: { title: '手动节点' }
     },
     {
-        path: '/subscriptions',
+        path: '/dashboard/subscriptions',
         name: 'MySubscriptions',
         component: MySubscriptionsView,
         meta: { title: '我的订阅' }
     },
     {
-        path: '/settings',
+        path: '/dashboard/settings',
         name: 'Settings',
         component: SettingsView,
         meta: { title: '设置' }
@@ -77,6 +79,19 @@ const router = createRouter({
             return savedPosition;
         } else {
             return { top: 0 };
+        }
+    }
+});
+
+// 自动恢复动态 chunk 加载失败导致的白屏
+router.onError((error) => {
+    const message = error?.message || '';
+    if (message.includes('Failed to fetch dynamically imported module')
+        || message.includes('error loading dynamically imported module')) {
+        const reloadKey = 'misub:chunk-reload';
+        if (sessionStorage.getItem(reloadKey) !== '1') {
+            sessionStorage.setItem(reloadKey, '1');
+            window.location.reload();
         }
     }
 });

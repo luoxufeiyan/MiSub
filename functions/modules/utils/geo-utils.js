@@ -8,7 +8,7 @@
  * 支持多语言地区识别
  */
 export const REGION_KEYWORDS = {
-    '香港': ['HK', 'HKG', '香港', 'Hong Kong', 'HongKong'],
+    '香港': ['HK', 'HKG', 'HKT', '香港', 'Hong Kong', 'HongKong'],
     '台湾': ['TW', 'TPE', '台湾', '台北', 'Taiwan', 'Taipei'],
     '新加坡': ['SG', 'SIN', '新加坡', 'Singapore'],
     '日本': ['JP', 'JPN', 'NRT', 'HND', 'KIX', 'FUK', '东京', '大阪', '日本', 'Japan', 'Tokyo', 'Osaka', 'Fukuoka', 'Yokohama'],
@@ -303,7 +303,7 @@ export function getRegionKeywords(region) {
  * @returns {string} 对应的 Emoji，如果未找到则返回空字符串
  */
 export function getRegionEmoji(region) {
-    return REGION_EMOJI[region] || '';
+    return REGION_EMOJI[region] || (region === '其他' || !region ? '🌍' : '');
 }
 
 /**

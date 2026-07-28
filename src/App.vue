@@ -1,27 +1,32 @@
 <script setup>
-import { defineAsyncComponent, onMounted, watch, computed } from 'vue';
+import { defineAsyncComponent, onMounted, watch, computed, ref } from 'vue';
+import RouteErrorBoundary from './components/ui/RouteErrorBoundary.vue';
 import { useRoute } from 'vue-router';
 import { useThemeStore } from './stores/theme';
 import { useSessionStore } from './stores/session';
 import { useToastStore } from './stores/toast';
 import { useDataStore } from './stores/useDataStore';
 import { useUIStore } from './stores/ui';
+import { useVersionStore } from './stores/version';
 import { storeToRefs } from 'pinia';
 import NavBar from './components/layout/NavBar.vue';
+import { detectLegacyD1 } from './lib/api.js';
+import { useI18n } from './i18n/index.js';
 
 // Lazy components
 const Login = defineAsyncComponent(() => import('./components/modals/Login.vue'));
 const NotFound = defineAsyncComponent(() => import('./views/NotFound.vue'));
 const Toast = defineAsyncComponent(() => import('./components/ui/Toast.vue'));
 const Footer = defineAsyncComponent(() => import('./components/layout/Footer.vue'));
-const PWAUpdatePrompt = defineAsyncComponent(() => import('./components/features/PWAUpdatePrompt.vue'));
-const PWADevTools = defineAsyncComponent(() => import('./components/features/PWADevTools.vue'));
 const Dashboard = defineAsyncComponent(() => import('./components/features/Dashboard/Dashboard.vue'));
 const Header = defineAsyncComponent(() => import('./components/layout/Header.vue'));
 const SavePrompt = defineAsyncComponent(() => import('./components/ui/SavePrompt.vue'));
 const ScrollToTop = defineAsyncComponent(() => import('./components/ui/ScrollToTop.vue'));
+const LegacyD1MigrationModal = defineAsyncComponent(() => import('./components/modals/LegacyD1MigrationModal.vue'));
+const VersionChangelogModal = defineAsyncComponent(() => import('./components/modals/VersionChangelogModal.vue'));
 
 const route = useRoute();
+const { t } = useI18n();
 const themeStore = useThemeStore();
 const { theme } = storeToRefs(themeStore);
 const { initTheme } = themeStore;
@@ -38,11 +43,43 @@ const { isDirty, saveState } = storeToRefs(dataStore);
 const uiStore = useUIStore();
 const { layoutMode } = storeToRefs(uiStore);
 
+const versionStore = useVersionStore();
+const { 
+  showModal: showVersionChangelogModal, 
+  showUpdateNotice, 
+  latestRelease: versionReleaseInfo,
+  currentVersion
+} = storeToRefs(versionStore);
+
 const isLoggedIn = computed(() => sessionState.value === 'loggedIn');
 const isPublicRoute = computed(() => route.meta.isPublic);
+const isSessionLoading = computed(() => sessionState.value === 'loading');
 
 const showModernNavBar = computed(() => isLoggedIn.value && layoutMode.value === 'modern');
-const showLegacyHeader = computed(() => !showModernNavBar.value && (isLoggedIn.value || isPublicRoute.value));
+const shouldHidePublicBranding = computed(() => {
+  if (isLoggedIn.value || !isPublicRoute.value) return false;
+  return sessionStore.publicConfig?.customPage?.enabled === true && sessionStore.publicConfig?.customPage?.hideBranding === true;
+});
+const shouldHidePublicHeader = computed(() => {
+  if (isLoggedIn.value || !isPublicRoute.value) return false;
+  return sessionStore.publicConfig?.customPage?.enabled === true && sessionStore.publicConfig?.customPage?.hideHeader === true;
+});
+
+const shouldHidePublicFooter = computed(() => {
+  if (isLoggedIn.value || !isPublicRoute.value) return false;
+  return sessionStore.publicConfig?.customPage?.enabled === true && sessionStore.publicConfig?.customPage?.hideFooter === true;
+});
+
+const showLegacyHeader = computed(() => {
+  if (showModernNavBar.value) return false;
+  if (isLoggedIn.value) return true;
+  if (isSessionLoading.value || !isPublicRoute.value) return false;
+  return !shouldHidePublicHeader.value;
+});
+const showPublicFooter = computed(() => {
+  return !shouldHidePublicFooter.value;
+});
+const shouldShowFooter = computed(() => !isSessionLoading.value && (!isPublicRoute.value || showPublicFooter.value));
 
 const shouldCenterMain = computed(() =>
   sessionState.value !== 'loggedIn' &&
@@ -54,6 +91,10 @@ const showSavePrompt = computed(() =>
   layoutMode.value === 'modern' && (isDirty.value || saveState.value === 'success')
 );
 
+const showLegacyD1MigrationModal = ref(false);
+const legacyD1Details = ref({ hasLegacySubscriptions: false, hasLegacyProfiles: false });
+const pendingVersionModal = ref(false);
+
 // Determine which login component to show (Custom Path -> NotFound, else -> Login)
 const loginComponent = computed(() => {
   const rawPath = sessionStore.publicConfig?.customLoginPath;
@@ -63,27 +104,89 @@ const loginComponent = computed(() => {
 });
 
 const isDefaultPassword = computed(() => {
-  return sessionStore.subscriptionConfig?.isDefaultPassword === true;
+  return sessionStore.subscriptionConfig?.isDefaultPassword === true
+    || sessionStore.securityWarning?.type === 'default_admin_password';
 });
+const defaultPasswordWarningMessage = computed(() => (
+  sessionStore.securityWarning?.message
+  || t('notices.defaultPasswordWarning')
+));
 
 onMounted(async () => {
   initTheme();
   await checkSession();
 });
 
+watch(
+  () => [route.fullPath, sessionStore.publicConfig?.customPage?.enabled, sessionStore.publicConfig?.customPage?.hideBranding],
+  () => {
+    if (typeof document === 'undefined') return;
+    const rawTitle = route.meta?.title ? String(route.meta.title) : '';
+    document.title = shouldHidePublicBranding.value
+      ? (rawTitle || document.title || '')
+      : (rawTitle ? `${rawTitle} - MISUB` : 'MISUB');
+  },
+  { immediate: true }
+);
+
 watch(sessionState, async (newVal) => {
   if (newVal === 'loggedIn') {
     await dataStore.fetchData();
+
+    try {
+      const result = await detectLegacyD1();
+      if (result?.success && result.data?.hasLegacyData) {
+        legacyD1Details.value = result.data;
+        showLegacyD1MigrationModal.value = true;
+      }
+    } catch {
+      // Non-blocking legacy check.
+    }
+
+    try {
+      await versionStore.checkVersion(showLegacyD1MigrationModal.value);
+    } catch {
+      // Non-blocking version check.
+    }
   }
 }, { immediate: true });
+
+const handleLegacyD1MigrationSuccess = async () => {
+  showLegacyD1MigrationModal.value = false;
+  await dataStore.fetchData(true);
+  if (pendingVersionModal.value) {
+    versionStore.openModal();
+  }
+};
+
+const handleLegacyD1MigrationClose = (value) => {
+  showLegacyD1MigrationModal.value = value;
+  if (!value && pendingVersionModal.value) {
+    versionStore.openModal();
+  }
+};
+
+const handleVersionModalConfirm = () => {
+  versionStore.closeModal();
+};
+
+const handleVersionModalSuppress = () => {
+  versionStore.suppressUpdateModal();
+};
 
 const handleSave = async () => {
   await dataStore.saveData();
 };
 const handleDiscard = async () => {
   await dataStore.fetchData(true);
-  toastStore.showToast('已放弃所有未保存的更改');
+  toastStore.showToast(t('notices.discardedChanges'));
 };
+
+const isCustomPageFullWidth = computed(() => {
+  if (!isPublicRoute.value) return false;
+  const cp = sessionStore.publicConfig?.customPage;
+  return cp?.enabled === true && cp?.useDefaultLayout === false;
+});
 
 </script>
 
@@ -92,12 +195,15 @@ const handleDiscard = async () => {
     class="min-h-screen flex flex-col text-gray-800 dark:text-gray-200 transition-colors duration-300 bg-gray-100 dark:bg-[#030712]">
     <!-- Navigation -->
     <NavBar v-if="showModernNavBar" :is-logged-in="true" @logout="logout" />
-    <Header v-else-if="showLegacyHeader" :is-logged-in="isLoggedIn" @logout="logout" />
+    <Header v-else-if="showLegacyHeader" :is-logged-in="isLoggedIn" :hide-branding="shouldHidePublicBranding" @logout="logout" />
 
-<main class="grow w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-24 md:pb-6" :class="{
-'flex items-center justify-center': shouldCenterMain,
-'ios-header-padding': showLegacyHeader
-}">
+    <main :class="[
+      isCustomPageFullWidth ? 'grow w-full min-h-[100dvh]' : 'grow w-full py-6 pb-24 md:pb-6 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8',
+      {
+        'flex items-center justify-center': shouldCenterMain,
+        'ios-header-padding': showLegacyHeader
+      }
+    ]">
 <div
 v-if="sessionState === 'loading'"
 class="flex flex-col items-center justify-center p-8 min-h-[60vh]"
@@ -125,8 +231,21 @@ aria-live="polite"
 </svg>
 </div>
 <p class="text-sm font-medium">
-安全警告：检测到您正在使用默认密码 "admin"。为了您的系统安全，请立即前往设置修改密码。
+{{ defaultPasswordWarningMessage }}
 </p>
+</div>
+</div>
+
+<div v-if="showUpdateNotice && versionReleaseInfo" class="mb-4 rounded-lg border border-amber-200/70 bg-amber-50/90 px-4 py-3 text-amber-800 shadow-sm dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+<div class="flex items-start justify-between gap-4">
+<div class="space-y-1">
+<p class="text-sm font-semibold">{{ t('notices.updateAvailable', { version: versionReleaseInfo.tag_name }) }}</p>
+<p class="text-sm opacity-90">{{ t('notices.currentVersion', { version: currentVersion }) }}</p>
+<a v-if="versionReleaseInfo.html_url" :href="versionReleaseInfo.html_url" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-sm font-medium underline underline-offset-2">
+{{ t('actions.viewReleaseNotes') }}
+</a>
+</div>
+<button @click="showUpdateNotice = false" class="rounded-md px-2 py-1 text-sm hover:bg-amber-100/80 dark:hover:bg-white/10">{{ t('actions.gotIt') }}</button>
 </div>
 </div>
 
@@ -134,7 +253,9 @@ aria-live="polite"
 
         <router-view v-if="layoutMode === 'modern'" v-slot="{ Component }">
           <transition name="fade" mode="out-in">
-            <component :is="Component" />
+            <RouteErrorBoundary :reset-key="route.fullPath">
+              <component :is="Component" />
+            </RouteErrorBoundary>
           </transition>
         </router-view>
 
@@ -145,7 +266,9 @@ aria-live="polite"
       <template v-else-if="isPublicRoute">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
-            <component :is="Component" />
+            <RouteErrorBoundary :reset-key="route.fullPath">
+              <component :is="Component" />
+            </RouteErrorBoundary>
           </transition>
         </router-view>
       </template>
@@ -158,9 +281,21 @@ aria-live="polite"
     </main>
 
 <Toast />
-<PWAUpdatePrompt />
-<PWADevTools />
-<Footer />
+    <LegacyD1MigrationModal
+      :show="showLegacyD1MigrationModal"
+      :details="legacyD1Details"
+      @update:show="handleLegacyD1MigrationClose"
+      @success="handleLegacyD1MigrationSuccess"
+    />
+    <VersionChangelogModal
+      :show="showVersionChangelogModal"
+      :release="versionReleaseInfo || {}"
+      :current-version="currentVersion"
+      @update:show="versionStore.closeModal"
+      @confirm="handleVersionModalConfirm"
+      @suppress="handleVersionModalSuppress"
+    />
+    <Footer v-if="shouldShowFooter" :hide-branding="shouldHidePublicBranding" />
 <ScrollToTop v-if="isLoggedIn || isPublicRoute" />
 </div>
 </template>

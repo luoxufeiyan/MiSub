@@ -7,8 +7,9 @@
  * 注意：Surge 不支持 VLESS 协议，VLESS 节点会被跳过
  */
 
-import { urlToClashProxy } from '../../utils/url-to-clash.js';
+import { urlToClashProxy, urlsToClashProxies } from '../../utils/url-to-clash.js';
 import { getUniqueName } from './name-utils.js';
+import { POLICY_GROUPS, getBuiltinRules, getRemoteProviderDefinitions, DEFAULT_SELECT_GROUP, DEFAULT_RELAY_GROUP, pruneProxyGroups } from './builtin-rules-provider.js';
 
 /**
  * 清理字符串中的控制字符（保留换行和制表符）
@@ -66,6 +67,8 @@ function clashProxyToSurgeResult(proxy) {
 
     const name = sanitizeNodeName(proxy.name);
     const type = (proxy.type || '').toLowerCase();
+    if (type === 'vless') return null;
+
     const server = proxy.server;
     const port = proxy.port;
 
@@ -79,14 +82,25 @@ function clashProxyToSurgeResult(proxy) {
         parts.push(String(port));
         parts.push(`encrypt-method=${proxy.cipher || 'aes-128-gcm'}`);
         parts.push(`password=${surgeQuote(proxy.password || '')}`);
-        // obfs 支持 - 处理 plugin=obfs-local 和直接 obfs 字段两种格式
-        if (proxy.plugin === 'obfs-local' || proxy.pluginOpts?.mode || proxy.obfs) {
-            const obfsMode = proxy.pluginOpts?.mode || proxy.obfs;
+        // 插件支持 (obfs / v2ray-plugin)
+        const plugin = proxy.plugin || '';
+        const opts = proxy['plugin-opts'] || proxy.pluginOpts || {};
+
+        if (plugin === 'obfs-local' || opts.mode === 'http' || opts.mode === 'tls' || proxy.obfs) {
+            const obfsMode = opts.mode || proxy.obfs;
             if (obfsMode) parts.push(`obfs=${obfsMode}`);
-            const obfsHost = proxy.pluginOpts?.host || proxy['obfs-host'];
+            const obfsHost = opts.host || proxy['obfs-host'];
             if (obfsHost) parts.push(`obfs-host=${obfsHost}`);
-            const obfsUri = proxy.pluginOpts?.uri || proxy['obfs-uri'];
+            const obfsUri = opts.uri || proxy['obfs-uri'];
             if (obfsUri) parts.push(`obfs-uri=${obfsUri}`);
+        } else if (plugin === 'v2ray-plugin' || opts.mode === 'websocket') {
+            // v2ray-plugin 映射为 Surge 原生 WS 支持
+            if (opts.mode === 'websocket' || opts.mode === 'websocket-tls') {
+                parts.push('ws=true');
+                if (opts.path) parts.push(`ws-path=${surgeQuote(opts.path)}`);
+                if (opts.host) parts.push(`ws-headers=Host:${opts.host}`);
+                if (opts.tls || opts.mode === 'websocket-tls') parts.push('tls=true');
+            }
         }
         // SS UDP 的独立端口（ShadowTLS 场景）
         if (proxy['udp-port']) parts.push(`udp-port=${proxy['udp-port']}`);
@@ -234,10 +248,6 @@ function clashProxyToSurgeResult(proxy) {
         // SOCKS5 的 UDP 需要手动开启
         if (proxy.udp) parts.push('udp-relay=true');
         if (type === 'socks5-tls') appendTlsParams(parts, proxy);
-    } else if (type === 'vless') {
-        // Surge 不原生支持 VLESS 协议，跳过
-        console.debug(`[BuiltinSurge] 跳过不支持的 VLESS 节点: ${name}`);
-        return null;
     } else {
         // 不支持的类型
         return null;
@@ -253,6 +263,15 @@ function clashProxyToSurgeResult(proxy) {
         parts.push(`shadow-tls-password=${proxy['shadow-tls-password']}`);
         if (proxy['shadow-tls-sni']) parts.push(`shadow-tls-sni=${proxy['shadow-tls-sni']}`);
         if (proxy['shadow-tls-version']) parts.push(`shadow-tls-version=${proxy['shadow-tls-version']}`);
+    }
+
+    // TCP Fast Open
+    if (proxy.tfo) {
+        // 大多数协议在 Surge 中支持 tfo=true
+        // 注意：Snell 已经在上面单独处理过了，这里加一个判断避免重复
+        if (type !== 'snell' && !parts.some(p => p.startsWith('tfo='))) {
+            parts.push('tfo=true');
+        }
     }
 
     return { proxyLine: parts.join(', ') };
@@ -359,46 +378,42 @@ function appendTlsParams(parts, proxy) {
  * @param {Object} options - 配置选项
  * @returns {string} Surge INI 配置
  */
+
 export function generateBuiltinSurgeConfig(nodeList, options = {}) {
     const {
         fileName = 'MiSub',
         managedConfigUrl = '',
         interval = 86400,
         skipCertVerify = false,
-        enableUdp = false
+        enableUdp = false,
+        enableTfo = false,
+        ruleLevel = 'std'
     } = options;
 
-    // 清理控制字符后解析节点 URL 列表
     const cleanedNodeList = cleanControlChars(nodeList);
     const nodeUrls = cleanedNodeList
         .split('\n')
         .map(line => line.trim())
         .filter(line => line && !line.startsWith('#'));
 
-    // URL → Clash Proxy Object → Surge Result
     const results = [];
     const proxyNames = [];
 
-    for (const url of nodeUrls) {
-        const clashProxy = urlToClashProxy(url);
-        if (!clashProxy) continue;
+    // 转换为 Clash 代理对象
+    const proxies = urlsToClashProxies(nodeUrls, options);
 
-        if (skipCertVerify) {
-            clashProxy['skip-cert-verify'] = true;
-        }
-
-        if (enableUdp) {
-            clashProxy.udp = true;
-        }
-
+    // 应用 UDP 开关
+    // (已在 urlsToClashProxies 中全局处理)
+    
+    for (const clashProxy of proxies) {
         const result = clashProxyToSurgeResult(clashProxy);
         if (result) {
+            result.clashProxy = clashProxy; // 存储以保留元数据
             results.push(result);
             proxyNames.push(sanitizeNodeName(clashProxy.name));
         }
     }
 
-    // 处理重名（使用精确的名称匹配替换，避免误伤参数内容）
     const usedNames = new Map();
     const finalResults = [];
     const finalProxyNames = [];
@@ -407,10 +422,8 @@ export function generateBuiltinSurgeConfig(nodeList, options = {}) {
         const baseName = proxyNames[i];
         const uniqueName = getUniqueName(baseName, usedNames);
         if (uniqueName !== baseName) {
-            // 仅替换行首的名称部分（"name = " 前缀）
             const updatedResult = { ...results[i] };
             updatedResult.proxyLine = results[i].proxyLine.replace(`${baseName} = `, `${uniqueName} = `);
-            // WireGuard section 中也需要更新名称
             if (updatedResult.wireguardSection) {
                 updatedResult.wireguardSection = results[i].wireguardSection
                     .replace(new RegExp(`WG_${escapeRegExp(baseName.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_'))}`, 'g'),
@@ -428,93 +441,71 @@ export function generateBuiltinSurgeConfig(nodeList, options = {}) {
         return `[General]\nloglevel = notify\n\n[Proxy]\nDIRECT = direct\n\n[Proxy Group]\n\n[Rule]\nFINAL,DIRECT\n`;
     }
 
-    // 提取代理行和 WireGuard sections
     const finalProxyLines = finalResults.map(r => r.proxyLine);
-    const wireguardSections = finalResults
-        .filter(r => r.wireguardSection)
-        .map(r => r.wireguardSection);
+    const wireguardSections = finalResults.filter(r => r.wireguardSection).map(r => r.wireguardSection);
 
-    // 构建 Surge 配置
     const sections = [];
+    const managedLine = managedConfigUrl ? `#!MANAGED-CONFIG ${managedConfigUrl} interval=${interval} strict=false\n\n` : '';
 
-    // #!MANAGED-CONFIG（可选）
-    const managedLine = managedConfigUrl
-        ? `#!MANAGED-CONFIG ${managedConfigUrl} interval=${interval} strict=false\n\n`
-        : '';
-
-    // [General]
     sections.push(`${managedLine}[General]
 loglevel = notify
 skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local
 dns-server = 119.29.29.29, 223.5.5.5, system`);
 
-    // [Proxy]
-    sections.push(`[Proxy]
-DIRECT = direct
-${finalProxyLines.join('\n')}`);
+    sections.push(`[Proxy]\nDIRECT = direct\n${finalProxyLines.join('\n')}`);
 
-    // --- 高级分组逻辑 (按地区分类) ---
-    const regionGroups = {
-        '🇭🇰 香港节点': /港|HK|Hong Kong/i,
-        '🇹🇼 台湾节点': /台|TW|Taiwan/i,
-        '🇯🇵 日本节点': /日|JP|Japan/i,
-        '🇸🇬 狮城节点': /狮城|新|SG|Singapore/i,
-        '🇺🇸 美国节点': /美|US|America/i,
-        '🇰🇷 韩国节点': /韩|KR|Korea/i,
-        '🇬🇧 英国节点': /英|UK|England/i,
-    };
-
-    const activeRegionGroups = {};
-
-    // 遍历最终的节点名称列表，将节点归类到相应的地区
-    for (const proxyName of finalProxyNames) {
-        for (const [groupName, regex] of Object.entries(regionGroups)) {
-            if (regex.test(proxyName)) {
-                if (!activeRegionGroups[groupName]) {
-                    activeRegionGroups[groupName] = [];
-                }
-                activeRegionGroups[groupName].push(proxyName);
-            }
+    const levelKey = (ruleLevel || 'std').toUpperCase();
+    const policyFactory = POLICY_GROUPS[levelKey] || POLICY_GROUPS.STD;
+    
+    // 构造带元数据的代理对象用于策略分组
+    const proxiesForGrouping = finalProxyNames.map((name, index) => ({
+        tag: name,
+        name: name,
+        metadata: finalResults[index].clashProxy?.metadata || {}
+    }));
+    
+    // 生成策略组
+    let abstractGroups = policyFactory(proxiesForGrouping, options);
+    if (levelKey === 'RELAY') {
+        abstractGroups = abstractGroups.map(group => group.name === '🔗 链式代理'
+            ? { ...group, type: 'relay', proxies: ['入口节点', '落地节点'] }
+            : group
+        );
+        if (!abstractGroups.some(group => group.name === '落地节点')) {
+            const proxyNames = proxiesForGrouping.map(proxy => proxy.name);
+            abstractGroups.splice(abstractGroups.findIndex(group => group.name === '入口节点') + 1, 0, {
+                name: '落地节点',
+                type: 'select',
+                proxies: ['♻️ 自动选择', '👋 手动切换', 'DIRECT', ...proxyNames]
+            });
         }
     }
-
-    // [Proxy Group]
-    const proxyNamesList = finalProxyNames.join(', ');
-    const activeRegionGroupNames = Object.keys(activeRegionGroups);
-    const regionGroupRefs = activeRegionGroupNames.length > 0 ? `, ${activeRegionGroupNames.join(', ')}` : '';
-
-    const proxyGroupLines = [];
-    // 主分组，优先层叠地区分组，然后再层叠所有节点（作为垫底或者直选）
-    proxyGroupLines.push(`📶 节点选择 = select, ♻️ 自动选择${regionGroupRefs}, ${proxyNamesList}, DIRECT`);
-    proxyGroupLines.push(`♻️ 自动选择 = url-test, ${proxyNamesList}, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50`);
-
-    // 添加各个有效地区的分组
-    for (const groupName of activeRegionGroupNames) {
-        const nodesInGroup = activeRegionGroups[groupName].join(', ');
-        // 地区组内默认使用 url-test 自动测速选择，同时作为二级策略
-        proxyGroupLines.push(`${groupName} = url-test, ${nodesInGroup}, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50`);
-    }
+    const proxyGroupLines = abstractGroups.map(group => {
+        let type = group.type === 'url-test' ? 'url-test' : 'select';
+        if (group.type === 'fallback') type = 'fallback';
+        if (group.type === 'relay') type = 'relay';
+        
+        const proxies = group.proxies.join(', ');
+        const extra = type === 'url-test' || type === 'fallback' ? ', url=http://www.gstatic.com/generate_204, interval=300, tolerance=50' : '';
+        return `${group.name} = ${type}, ${proxies}${extra}`;
+    });
 
     sections.push(`[Proxy Group]\n${proxyGroupLines.join('\n')}`);
 
-    // [Rule]
-    // 引入高级规则集 (Rule-Set)
+    // Surge [Rule]
+    const builtinRuleLines = getBuiltinRules(levelKey, 'surge');
     const ruleLines = [
-        '# 苹果服务直连',
-        'RULE-SET,https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Surge/Apple/Apple.list,DIRECT',
-        '# 全球媒体走代理',
-        'RULE-SET,https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Surge/GlobalMedia/GlobalMedia.list,📶 节点选择',
-        '# 电报走代理',
-        'RULE-SET,https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Surge/Telegram/Telegram.list,📶 节点选择',
-        '# 国内直连',
-        'RULE-SET,https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Surge/China/China.list,DIRECT',
-        '# 兜底分流',
-        'GEOIP,CN,DIRECT',
-        'FINAL,📶 节点选择,dns-failed'
+        '# 基础分流',
+        'DOMAIN-SUFFIX,localhost,DIRECT',
+        'IP-CIDR,127.0.0.1/8,DIRECT',
+        'IP-CIDR,10.0.0.0/8,DIRECT',
+        'IP-CIDR,172.16.0.0/12,DIRECT',
+        'IP-CIDR,192.168.0.0/16,DIRECT',
+        ...builtinRuleLines,
+        `FINAL,${levelKey === 'RELAY' ? DEFAULT_RELAY_GROUP : DEFAULT_SELECT_GROUP},dns-failed`
     ];
-    sections.push(`[Rule]\n${ruleLines.join('\n')}`);
+    sections.push(`[Rule]\n${ruleLines.filter(Boolean).join('\n')}`);
 
-    // [WireGuard] sections（如果有）
     if (wireguardSections.length > 0) {
         sections.push(wireguardSections.join('\n\n'));
     }
@@ -522,11 +513,6 @@ ${finalProxyLines.join('\n')}`);
     return sections.join('\n\n') + '\n';
 }
 
-/**
- * 转义正则表达式特殊字符
- * @param {string} str
- * @returns {string}
- */
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

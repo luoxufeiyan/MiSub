@@ -1,5 +1,5 @@
 import { StorageFactory } from '../../storage-adapter.js';
-import { createJsonResponse, createErrorResponse } from '../utils.js';
+import { createJsonResponse, createErrorResponse, JSON_BODY_LIMITS, readJsonWithLimit } from '../utils.js';
 import { KV_KEY_PROFILES } from '../config.js';
 import { handleProfileMode } from './profile-handler.js';
 import { handleSingleSubscriptionMode, handleDirectUrlMode } from './single-subscription.js';
@@ -32,7 +32,7 @@ export async function handlePublicPreviewRequest(request, env) {
     }
 
     try {
-        const requestData = await request.json();
+        const requestData = await readJsonWithLimit(request, JSON_BODY_LIMITS.normal);
         const { profileId, userAgent = 'MiSub-Public-Preview/1.0' } = requestData;
 
         if (!profileId) {
@@ -41,21 +41,29 @@ export async function handlePublicPreviewRequest(request, env) {
 
         // 验证是否为公开订阅组
         const storageAdapter = StorageFactory.createAdapter(env, await StorageFactory.getStorageType(env));
-        const allProfiles = await storageAdapter.get(KV_KEY_PROFILES) || [];
-        const profile = allProfiles.find(p => (p.customId && p.customId === profileId) || p.id === profileId);
+        const profile = typeof storageAdapter.getProfileById === 'function'
+            ? await storageAdapter.getProfileById(profileId)
+            : (await storageAdapter.get(KV_KEY_PROFILES) || []).find(p => (p.customId && p.customId === profileId) || p.id === profileId);
 
         if (!profile || !profile.enabled || !profile.isPublic) {
             return createJsonResponse({ error: 'Profile not found or not public' }, 404);
         }
 
         // 调用 handleProfileMode 获取节点（公开页默认显示处理后的结果）
-        const shouldSkipCertificateVerify = Boolean(profile?.subConverterScv || profile?.skipCertVerify || profile?.skipCertificateVerify || profile?.settings?.subConverterScv);
+        const shouldSkipCertificateVerify = Boolean(
+            profile?.builtinSkipCertVerify ||
+            profile?.transformBackendScv ||
+            profile?.skipCertVerify ||
+            profile?.skipCertificateVerify ||
+            profile?.settings?.builtinSkipCertVerify ||
+            profile?.settings?.transformBackendScv
+        );
         const result = await handleProfileMode(request, env, profile.id, userAgent, true, shouldSkipCertificateVerify);
 
         return createJsonResponse(result);
 
     } catch (e) {
-        return createErrorResponse(`Preview failed: ${e.message}`, 500);
+        return createErrorResponse(`Preview failed: ${e.message}`, e.status || 500);
     }
 }
 
@@ -71,7 +79,7 @@ export async function handleSubscriptionNodesRequest(request, env) {
     }
 
     try {
-        const requestData = await request.json();
+        const requestData = await readJsonWithLimit(request, JSON_BODY_LIMITS.normal);
         const {
             url: subscriptionUrl,
             subscriptionId,
@@ -115,6 +123,6 @@ export async function handleSubscriptionNodesRequest(request, env) {
     } catch (e) {
         return createJsonResponse({
             error: `获取节点列表失败: ${e.message}`
-        }, 500);
+        }, e.status || 500);
     }
 }

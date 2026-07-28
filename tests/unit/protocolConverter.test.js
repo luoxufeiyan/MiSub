@@ -17,6 +17,8 @@ vi.stubGlobal('atob', (str) => Buffer.from(str, 'base64').toString())
 // 导入被测试模块
 import {
     convertClashProxyToUrl,
+    parseClientConfig,
+    parseLoonConfig,
     parseSurgeConfig,
     parseQuantumultXConfig
 } from '../../src/utils/protocolConverter.js'
@@ -176,6 +178,30 @@ expect(result).toContain('sid=abc123')
                 expect(result).toBeTruthy()
                 expect(result).toMatch(/^hysteria2:\/\//)
             })
+
+            it('应保留Hysteria2 realm配置参数', () => {
+                const proxy = {
+                    name: 'Test Hy2 Realm',
+                    type: 'hysteria2',
+                    server: 'realm.hy2.io',
+                    port: 443,
+                    password: 'realm-id-value',
+                    'skip-cert-verify': true,
+                    'realm-opts': {
+                        enable: true,
+                        'server-url': 'https://realm.hy2.io',
+                        'realm-id': 'realm-id-value',
+                        token: 'public',
+                        'stun-servers': ['stun.sip.us:3478', 'stun.nextcloud.com:3478']
+                    }
+                }
+
+                const result = convertClashProxyToUrl(proxy)
+                expect(result).toContain('realm-id=realm-id-value')
+                expect(result).toContain('realm-token=public')
+                expect(result).toContain('realm-server=https%3A%2F%2Frealm.hy2.io')
+                expect(result).toContain('stun-servers=stun.sip.us%3A3478%2Cstun.nextcloud.com%3A3478')
+            })
         })
 
         describe('边界情况', () => {
@@ -186,13 +212,19 @@ expect(result).toContain('sid=abc123')
             })
 
             it('不支持的类型应返回null', () => {
-                const proxy = {
-                    name: 'Unknown',
-                    type: 'unknown-protocol',
-                    server: '1.2.3.4',
-                    port: 443
+                const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+                try {
+                    const proxy = {
+                        name: 'Unknown',
+                        type: 'unknown-protocol',
+                        server: '1.2.3.4',
+                        port: 443
+                    }
+                    expect(convertClashProxyToUrl(proxy)).toBeNull()
+                    expect(warnSpy).toHaveBeenCalledWith('不支持的代理类型: unknown-protocol')
+                } finally {
+                    warnSpy.mockRestore()
                 }
-                expect(convertClashProxyToUrl(proxy)).toBeNull()
             })
         })
     })
@@ -205,6 +237,55 @@ ss=Test SS,1.2.3.4,8388,aes-256-gcm,password123
 `
             const result = parseSurgeConfig(config)
             expect(result.length).toBeGreaterThan(0)
+        })
+
+        it('应正确解析 Surge WireGuard 配置', () => {
+            const config = `
+[Proxy]
+WG-Test = wireguard, 1.2.3.4, 51820, private-key=test-private, peer-public-key=test-peer, client-id=1/2/3, self-ip=172.16.0.2/32
+`
+            const result = parseSurgeConfig(config)
+            expect(result).toHaveLength(1)
+            expect(result[0].protocol).toBe('wireguard')
+            expect(result[0].url).toContain('wireguard://test-private@1.2.3.4:51820')
+            expect(result[0].url).toContain('publickey=test-peer')
+            expect(result[0].url).toContain('reserved=1%2C2%2C3')
+        })
+    })
+
+    describe('parseLoonConfig', () => {
+        it('应正确解析 Loon 常见代理配置', () => {
+            const config = `
+[Proxy]
+Test VMess = vmess, vmess.example.com, 443, uuid-1234, tls=true, transport=ws, host=example.com, path=/ws
+Test SS = Shadowsocks, 1.2.3.4, 8388, aes-128-gcm, password123
+Test Trojan = trojan, trojan.example.com, 443, secret, sni=example.com, skip-cert-verify=true
+Test VLESS = vless, vless.example.com, 443, uuid-vless, tls=true, transport=xhttp, host=example.org, path=/vless, mode=packet-up, reality=true, public-key=pubkey, short-id=abcd, sni=example.org, alpn=h3, fp=chrome
+Test HTTP = http, http.example.com, 8080, user, pass
+Test HY2 = hysteria2, hy2.example.com, 443, hy2pass, sni=hy2.example.com
+Test TUIC = tuic, tuic.example.com, 443, uuid-tuic, password=pass-tuic, sni=tuic.example.com
+Test WG = wireguard, wg.example.com, 51820, private-key-value, self-ip=172.16.0.2/32, public-key=peerpub, client-id=1/2/3
+Test Snell = snell, snell.example.com, 8443, psk-secret
+`
+            const result = parseLoonConfig(config)
+
+            expect(result).toHaveLength(9)
+            expect(result[0].protocol).toBe('vmess')
+            expect(result[1].protocol).toBe('ss')
+            expect(result[2].protocol).toBe('trojan')
+            expect(result[3].protocol).toBe('vless')
+            expect(result[4].protocol).toBe('http')
+            expect(result[5].protocol).toBe('hysteria2')
+            expect(result[6].protocol).toBe('tuic')
+            expect(result[7].protocol).toBe('wireguard')
+            expect(result[8].protocol).toBe('snell')
+            expect(result[2].url).toContain('allowInsecure=1')
+            expect(result[3].url).toContain('security=reality')
+            expect(result[3].url).toContain('xhttp-host=example.org')
+            expect(result[3].url).toContain('xhttp-path=%2Fvless')
+            expect(result[3].url).toContain('pbk=pubkey')
+            expect(result[3].url).toContain('alpn=h3')
+            expect(result[3].url).toContain('fp=chrome')
         })
     })
 
@@ -230,6 +311,108 @@ vmess=Test VMess, vmess.example.com, 443, auto, uuid-1234, 0, net=ws, host=examp
             expect(decoded.net).toBe('ws')
             expect(decoded.path).toBe('/ws')
             expect(decoded.host).toBe('example.com')
+        })
+
+        it('应解析带额外字段的SS和Trojan配置', () => {
+            const config = `
+[server_local]
+shadowsocks=Test SS, 1.2.3.4, 443, aes-128-gcm, password, obfs=ws, obfs-host=example.com
+trojan=Test Trojan, 1.2.3.5, 443, password, tls=true, tls-host=example.org
+`
+            const result = parseQuantumultXConfig(config)
+
+            expect(result).toHaveLength(2)
+            expect(result[0].protocol).toBe('ss')
+            expect(result[1].protocol).toBe('trojan')
+        })
+
+        it('应解析带 ws 和 tls-host 的 VMess 配置', () => {
+            const config = `
+[server_local]
+vmess=Test WS, vmess.example.com, 443, auto, uuid-5678, 0, net=ws, host=example.com, path=/ws, tls=true, tls-host=example.org
+`
+            const result = parseQuantumultXConfig(config)
+
+            expect(result).toHaveLength(1)
+            const decoded = JSON.parse(atob(result[0].url.replace('vmess://', '')))
+            expect(decoded.net).toBe('ws')
+            expect(decoded.host).toBe('example.org')
+            expect(decoded.path).toBe('/ws')
+            expect(decoded.tls).toBe('true')
+        })
+
+        it('应解析 VLESS 与 HTTPS 配置', () => {
+            const config = `
+[server_local]
+vless=Test VLESS, vless.example.com, 443, uuid-vless, transport=ws, path=/ws, tls=true, tls-host=example.org
+https=Test HTTPS, https.example.com, 443, user, pass, tls-host=secure.example.com
+`
+            const result = parseQuantumultXConfig(config)
+
+            expect(result).toHaveLength(2)
+            expect(result[0].protocol).toBe('vless')
+            expect(result[0].url).toContain('vless://uuid-vless@vless.example.com:443')
+            expect(result[1].protocol).toBe('https')
+            expect(result[1].url).toContain('https://user:pass@https.example.com:443')
+        })
+
+        it('应解析 Hysteria2 与 TUIC 配置', () => {
+            const config = `
+[server_local]
+hysteria2=Test HY2, hy2.example.com, 443, hy2pass, sni=hy2.example.com
+tuic=Test TUIC, tuic.example.com, 443, uuid-tuic, pass-tuic, sni=tuic.example.com
+`
+            const result = parseQuantumultXConfig(config)
+
+            expect(result).toHaveLength(2)
+            expect(result[0].protocol).toBe('hysteria2')
+            expect(result[0].url).toContain('hysteria2://hy2pass@hy2.example.com:443')
+            expect(result[1].protocol).toBe('tuic')
+            expect(result[1].url).toContain('tuic://uuid-tuic:pass-tuic@tuic.example.com:443')
+        })
+
+        it('应解析 AnyTLS 配置', () => {
+            const config = `
+[server_local]
+anytls=Test AnyTLS, anytls.example.com, 443, password=anytls-pass, sni=example.com, alpn=h2,h3, tls-verification=false
+`
+            const result = parseQuantumultXConfig(config)
+
+            expect(result).toHaveLength(1)
+            expect(result[0].protocol).toBe('anytls')
+            expect(result[0].url).toContain('anytls://anytls-pass@anytls.example.com:443')
+            expect(result[0].url).toContain('sni=example.com')
+            expect(result[0].url).toContain('allowInsecure=1')
+        })
+    })
+
+    describe('parseClientConfig', () => {
+        it('应自动识别 Surge / Loon / QX 配置', () => {
+            const surge = parseClientConfig('[Proxy]\nss=Test SS,1.2.3.4,8388,aes-256-gcm,password123')
+            const loon = parseClientConfig('[Proxy]\nTest SS = Shadowsocks, 1.2.3.4, 8388, aes-128-gcm, password123')
+            const quanx = parseClientConfig('[server_local]\nshadowsocks=Test SS, 1.2.3.4, 443, aes-128-gcm, password')
+            const surgeWireguard = parseClientConfig('[Proxy]\nWG-Test = wireguard, 1.2.3.4, 51820, private-key=test-private, peer-public-key=test-peer')
+
+            expect(surge.client).toBe('surge')
+            expect(loon.client).toBe('loon')
+            expect(quanx.client).toBe('quantumultx')
+            expect(surgeWireguard.client).toBe('surge')
+            expect(surge.nodes.length).toBeGreaterThan(0)
+            expect(loon.nodes.length).toBeGreaterThan(0)
+            expect(quanx.nodes.length).toBeGreaterThan(0)
+            expect(surgeWireguard.nodes.length).toBeGreaterThan(0)
+        })
+
+        it('应解析 Loon AnyTLS 配置', () => {
+            const loon = parseClientConfig('[Proxy]\nAnyTLS-HK = anytls, 156.239.232.67, 443, password123, sni=example.com, alpn=h2,h3, skip-cert-verify=true')
+
+            expect(loon.client).toBe('loon')
+            expect(loon.nodes).toHaveLength(1)
+            expect(loon.nodes[0].protocol).toBe('anytls')
+            expect(loon.nodes[0].url).toContain('anytls://password123@156.239.232.67:443')
+            expect(loon.nodes[0].url).toContain('sni=example.com')
+            expect(loon.nodes[0].url).toContain('alpn=h2')
+            expect(loon.nodes[0].url).toContain('allowInsecure=1')
         })
     })
 })

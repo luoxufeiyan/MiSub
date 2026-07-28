@@ -1,7 +1,34 @@
 import { ref, computed } from 'vue';
 import { useToastStore } from '../stores/toast.js';
-import { fetchSettings, saveSettings } from '../lib/api.js';
+import { DEFAULT_SETTINGS } from '../constants/default-settings.js';
+import { fetchSettings, saveSettings, resetSettings } from '../lib/api.js';
 import { useBackupLogic } from './useBackupLogic.js';
+import { t, setLocale } from '../i18n/index.js';
+
+function normalizeExternalApiConfig(value) {
+    const defaults = DEFAULT_SETTINGS.externalApi;
+    const externalApi = value && typeof value === 'object' ? value : {};
+    const tokens = Array.isArray(externalApi.tokens)
+        ? externalApi.tokens
+            .map((item, index) => ({
+                name: String(item?.name || `token-${index + 1}`).trim() || `token-${index + 1}`,
+                token: String(item?.token || '').trim()
+            }))
+            .filter((item) => item.token || item.name)
+        : [];
+
+    return {
+        ...defaults,
+        ...externalApi,
+        tokens: tokens.length > 0 ? tokens : defaults.tokens.map((item) => ({ ...item }))
+    };
+}
+
+function normalizeSettingsObject(source = {}) {
+    const merged = { ...DEFAULT_SETTINGS, ...source };
+    merged.externalApi = normalizeExternalApiConfig(source.externalApi ?? merged.externalApi);
+    return merged;
+}
 
 /**
  * 设置页面的核心逻辑 composable
@@ -14,7 +41,7 @@ export function useSettingsLogic() {
     const { exportBackup, importBackup } = useBackupLogic();
 
     // ========== 状态定义 ==========
-    const settings = ref({});
+    const settings = ref(normalizeSettingsObject(DEFAULT_SETTINGS));
     const isLoading = ref(false);
     const isSaving = ref(false);
     const showMigrationModal = ref(false);
@@ -29,7 +56,7 @@ export function useSettingsLogic() {
 
     // ========== 计算属性 ==========
     const hasWhitespace = computed(() => {
-        const fieldsCheck = ['FileName', 'mytoken', 'profileToken', 'subConverter', 'subConfig', 'BotToken', 'ChatID'];
+        const fieldsCheck = ['FileName', 'mytoken', 'profileToken', 'transformConfig', 'BotToken', 'ChatID'];
         for (const key of fieldsCheck) {
             if (settings.value[key] && /\s/.test(settings.value[key])) return true;
         }
@@ -48,10 +75,9 @@ export function useSettingsLogic() {
         try {
             const result = await fetchSettings();
             if (result.success) {
-                settings.value = result.data;
+                const incoming = result.data && typeof result.data === 'object' ? result.data : {};
+                settings.value = normalizeSettingsObject(incoming);
 
-                // 初始化前缀配置
-                // 初始化伪装配置
                 if (settings.value.disguise) {
                     disguiseConfig.value = {
                         enabled: settings.value.disguise.enabled ?? false,
@@ -60,15 +86,21 @@ export function useSettingsLogic() {
                     };
                 }
 
-                // 确保 storageType 有默认值
                 if (!settings.value.storageType) {
                     settings.value.storageType = 'kv';
                 }
+
+                // 应用默认显示语言设置
+                if (settings.value.defaultLocale) {
+                    setLocale(settings.value.defaultLocale);
+                }
             } else {
-                showToast(`加载设置失败: ${result.error}`, 'error');
+                showToast(t('settings.loadFailedWithMessage', { message: result.error }), 'error');
+                settings.value = normalizeSettingsObject(DEFAULT_SETTINGS);
             }
         } catch (error) {
-            showToast('加载设置失败', 'error');
+            showToast(t('settings.loadFailed'), 'error');
+            settings.value = normalizeSettingsObject(DEFAULT_SETTINGS);
         } finally {
             isLoading.value = false;
         }
@@ -79,36 +111,44 @@ export function useSettingsLogic() {
      */
     const handleSave = async () => {
         if (hasWhitespace.value) {
-            showToast('输入项中不能包含空格', 'error');
-            return;
+            showToast(t('settings.noWhitespace'), 'error');
+            return false;
         }
         if (!isStorageTypeValid.value) {
-            showToast('存储类型设置无效', 'error');
-            return;
+            showToast(t('settings.invalidStorageType'), 'error');
+            return false;
         }
 
         isSaving.value = true;
         try {
             if (!settings.value.storageType) settings.value.storageType = 'kv';
+            settings.value.externalApi = normalizeExternalApiConfig(settings.value.externalApi);
 
             const settingsToSave = {
                 ...settings.value,
+                externalApi: normalizeExternalApiConfig(settings.value.externalApi),
                 disguise: disguiseConfig.value
             };
+
+            settingsToSave.ruleLevel = settingsToSave.ruleLevel || settingsToSave.clashRuleLevel || 'std';
 
             delete settingsToSave.prefixConfig;
             delete settingsToSave.prependSubName;
             delete settingsToSave.nodeTransform;
+            delete settingsToSave.clashRuleLevel;
 
             const result = await saveSettings(settingsToSave);
             if (result.success) {
-                showToast('设置已保存，页面将自动刷新...', 'success');
+                showToast(t('settings.savedReloading'), 'success');
                 setTimeout(() => window.location.reload(), 1500);
+                return true;
             } else {
-                throw new Error(result.error || '保存失败');
+                throw new Error(result.error || t('settings.saveFailed'));
             }
         } catch (error) {
             showToast(error.message, 'error');
+            return false;
+        } finally {
             isSaving.value = false;
         }
     };
@@ -119,26 +159,49 @@ export function useSettingsLogic() {
     const handleMigrationSuccess = () => {
         showMigrationModal.value = false;
         settings.value.storageType = 'd1';
-        showToast('数据迁移成功！系统已切换为 D1 存储', 'success');
+        showToast(t('settings.migrationSuccess'), 'success');
     };
 
-    // 备份函数由 useBackupLogic 提供
+    /**
+     * 处理恢复出厂设置
+     */
+    const handleReset = async () => {
+        if (!confirm(t('settings.resetConfirm'))) {
+            return;
+        }
+        
+        if (!confirm(t('settings.resetConfirmAgain'))) {
+            return;
+        }
 
-    // ========== 返回值 ==========
+        isLoading.value = true;
+        try {
+            const result = await resetSettings();
+            if (result.success) {
+                showToast(t('settings.resetSuccess'), 'success');
+                setTimeout(() => window.location.reload(), 1500);
+            } else {
+                showToast(t('settings.resetFailedWithMessage', { message: result.error }), 'error');
+            }
+        } catch (error) {
+            showToast(t('settings.resetRequestFailed'), 'error');
+        } finally {
+            isLoading.value = false;
+        }
+    };
+
     return {
-        // 状态
         settings,
         disguiseConfig,
         isLoading,
         isSaving,
         showMigrationModal,
-        // 计算属性
         hasWhitespace,
         isStorageTypeValid,
-        // 函数
         loadSettings,
         handleSave,
         handleMigrationSuccess,
+        handleReset,
         exportBackup,
         importBackup,
     };
